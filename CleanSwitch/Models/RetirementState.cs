@@ -129,9 +129,9 @@ public sealed class RetirementState
     [JsonPropertyOrder(7)]
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
-    /// <summary>Implementation phase that wrote this record ("2A", "2B", ...).</summary>
+    /// <summary>Implementation phase that wrote this record ("2A", "2B-identify", "2B", ...).</summary>
     [JsonPropertyOrder(8)]
-    public string Phase { get; set; } = "2A";
+    public string Phase { get; set; } = "2B-identify";
 
     /// <summary>
     /// False for every Phase 2A run. Phase 2B flips this only after a real deletion.
@@ -146,9 +146,17 @@ public sealed class RetirementState
     [JsonPropertyOrder(11)]
     public string? LastError { get; set; }
 
-    /// <summary>Stable identifiers for the partition Phase 2B will eventually retire.</summary>
+    /// <summary>Stable identifiers for Boot 1, recorded on Boot 1 at PENDING time.</summary>
     [JsonPropertyOrder(12)]
     public PartitionIdentity? Boot1Identity { get; set; }
+
+    /// <summary>Stable identifiers for Boot 2, recorded on Boot 1 at PENDING time.</summary>
+    [JsonPropertyOrder(13)]
+    public PartitionIdentity? Boot2Identity { get; set; }
+
+    /// <summary>Boot 1 identity as observed in recovery by GPT GUID lookup. Audit only.</summary>
+    [JsonPropertyOrder(14)]
+    public PartitionIdentity? Boot1IdentityObserved { get; set; }
 
     /// <summary>
     /// Stable identity of the volume this state file itself lives on, recorded when the
@@ -157,10 +165,10 @@ public sealed class RetirementState
     /// to be sure the two are the same volume: drive letters and Win32 volume GUIDs are
     /// both reassigned per Windows instance.
     /// </summary>
-    [JsonPropertyOrder(13)]
+    [JsonPropertyOrder(15)]
     public PartitionIdentity? StateVolumeIdentity { get; set; }
 
-    [JsonPropertyOrder(14)]
+    [JsonPropertyOrder(16)]
     public List<RetirementTransition> Transitions { get; set; } = [];
 
     public bool IsTerminal =>

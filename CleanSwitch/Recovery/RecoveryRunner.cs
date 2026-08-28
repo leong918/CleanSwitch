@@ -63,7 +63,7 @@ public sealed class RecoveryRunner
     /// </param>
     public async Task<RecoveryRunResult> RunAsync(bool dryRun)
     {
-        _log.Info("recovery", $"Recovery-side run starting. dryRun={dryRun}, phase=2A (non-destructive).");
+        _log.Info("recovery", $"Recovery-side run starting. dryRun={dryRun}, phase=2B-identify (non-destructive).");
 
         RetirementState? state;
         try
@@ -151,15 +151,36 @@ public sealed class RecoveryRunner
             return new RecoveryRunResult(RecoveryRunOutcome.HandoffScheduled, resumeMessage);
         }
 
-        // ---- Report-only target identification. Phase 2A does not validate for deletion. ----
-        _diskValidator.DescribeRunningSystemVolume();
-        var boot1Identity = await _bootEntryValidator.TryDescribeBootEntryVolumeAsync(state.Boot1Id);
-        var targetReport = _diskValidator.ReportRetirementTarget(boot1Identity);
-        _log.Info("recovery", targetReport.Describe());
-
-        if (boot1Identity is not null)
+        // ---- Phase 2B-identify: hard gate. No deletion. ----
+        var identification = IdentifyTarget(state);
+        if (!identification.Passed)
         {
-            state.Boot1Identity = boot1Identity;
+            var message =
+                "TARGET validation FAILED. No partition was changed and the PC will not be restarted." +
+                Environment.NewLine + identification.Describe();
+            _coordinator.MarkFailed(state, message);
+            return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
+        }
+
+        state.Boot1IdentityObserved = identification.ObservedBoot1;
+
+        if (state.Status == RetirementStatus.RecoveryStarted)
+        {
+            state = _coordinator.Transition(
+                state,
+                RetirementStatus.TargetValidated,
+                identification.Summary);
+        }
+
+        _log.Info("recovery", "TARGET_VALIDATED");
+        _log.Info("recovery", identification.Describe());
+
+        if (dryRun)
+        {
+            var dryRunMessage =
+                "TARGET_VALIDATED" + Environment.NewLine + identification.Describe() + Environment.NewLine +
+                "Dry run: deletion was not attempted and the BCD was not changed.";
+            return new RecoveryRunResult(RecoveryRunOutcome.DryRunCompleted, dryRunMessage);
         }
 
         // ---- Boot 2 must be a real, distinct Windows loader before we hand control over. ----
@@ -173,29 +194,20 @@ public sealed class RecoveryRunner
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
         }
 
-        if (state.Status == RetirementStatus.RecoveryStarted)
+        if (state.Status == RetirementStatus.TargetValidated)
         {
             state = _coordinator.Transition(
                 state,
                 RetirementStatus.Boot2Validated,
-                "Boot 2 BCD entry validated. Phase 2A skips TARGET_VALIDATED because nothing will be deleted.");
+                "Boot 2 BCD entry validated. Deletion remains NOT IMPLEMENTED.");
         }
 
-        // ---- Deletion: intentionally skipped in Phase 2A. ----
+        // ---- Deletion: still not implemented. ----
         _log.Warn(
             "recovery",
-            "PHASE 2A: Boot 1 deletion is SKIPPED. RetirementExecutor is not called, no partition is touched, " +
-            $"and no BCD entry is removed. Destructive implementation available={_executor.IsDestructiveRetirementAvailable}.");
-
-        if (dryRun)
-        {
-            var dryRunMessage =
-                "Dry run finished. Validations passed, deletion was skipped as designed, and neither the BCD " +
-                $"nor the running state of the PC was changed. State left at " +
-                $"{RetirementStatusNames.ToWire(state.Status)}.";
-            _log.Info("recovery", dryRunMessage);
-            return new RecoveryRunResult(RecoveryRunOutcome.DryRunCompleted, dryRunMessage);
-        }
+            "PHASE 2B-identify: Boot 1 deletion is SKIPPED. RetirementExecutor is not called, no partition is " +
+            "touched, and no BCD entry is removed. " +
+            $"Destructive implementation available={_executor.IsDestructiveRetirementAvailable}.");
 
         // ---- Hand off to Boot 2. ----
         await _bootManager.SetNextBootAsync(state.Boot2Id);
@@ -233,6 +245,93 @@ public sealed class RecoveryRunner
             RecoveryRunOutcome.HandoffScheduled,
             $"Boot 2 ({state.Boot2Id}) set as the next boot and a restart was scheduled in " +
             $"{_options.RestartDelaySeconds} second(s). Nothing was deleted.");
+    }
+
+    private TargetIdentification IdentifyTarget(RetirementState state)
+    {
+        _diskValidator.DescribeRunningSystemVolume();
+
+        if (state.Boot1Identity is null || !state.Boot1Identity.HasStableIdentifiers)
+        {
+            var report = new ValidationReport("Retirement target (identification gate)");
+            report.Fail(
+                "boot1-identity-recorded",
+                "Boot 1 partition identity was not recorded at PENDING time with disk+partition and GPT unique id. " +
+                "Re-run RETIRE SYSTEM from Boot 1 with the 2B-identify build.");
+            return TargetIdentification.Failed(report);
+        }
+
+        if (state.Boot2Identity is null || !state.Boot2Identity.HasStableIdentifiers)
+        {
+            var report = new ValidationReport("Retirement target (identification gate)");
+            report.Fail(
+                "boot2-identity-recorded",
+                "Boot 2 partition identity was not recorded at PENDING time. Re-run RETIRE SYSTEM from Boot 1.");
+            return TargetIdentification.Failed(report);
+        }
+
+        var observedBoot1 = _diskValidator.TryObserveByGptId(
+            state.Boot1Identity.GptPartitionId,
+            "WinRE observation of Boot 1 by recorded GPT unique partition GUID",
+            out var boot1Error);
+        if (observedBoot1 is null)
+        {
+            var report = new ValidationReport("Retirement target (identification gate)");
+            report.Fail("boot1-observed-by-gpt", boot1Error ?? "Boot 1 GPT GUID was not found in this environment.");
+            return TargetIdentification.Failed(report);
+        }
+
+        var observedBoot2 = _diskValidator.TryObserveByGptId(
+            state.Boot2Identity.GptPartitionId,
+            "WinRE observation of Boot 2 by recorded GPT unique partition GUID",
+            out var boot2Error);
+        if (observedBoot2 is null)
+        {
+            var report = new ValidationReport("Retirement target (identification gate)");
+            report.Fail("boot2-observed-by-gpt", boot2Error ?? "Boot 2 GPT GUID was not found in this environment.");
+            return TargetIdentification.Failed(report);
+        }
+
+        if (!string.Equals(
+                observedBoot2.GptPartitionId?.Trim(),
+                state.Boot2Identity.GptPartitionId?.Trim(),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            var report = new ValidationReport("Retirement target (identification gate)");
+            report.Fail(
+                "boot2-gpt-resolved",
+                $"Boot 2 GPT GUID in this environment is {observedBoot2.GptPartitionId}; " +
+                $"expected {state.Boot2Identity.GptPartitionId}.");
+            return TargetIdentification.Failed(report);
+        }
+
+        _log.Info("recovery", $"Boot 2 still present: {observedBoot2.Describe()}");
+
+        var reportGate = _diskValidator.ValidateRetirementTarget(
+            state.Boot1Identity,
+            observedBoot1,
+            state.Boot2Identity);
+
+        return new TargetIdentification(
+            reportGate.Passed,
+            reportGate.Passed
+                ? "TARGET_VALIDATED: Boot 1 identity matched in WinRE; Boot 2 GPT GUID still present; " +
+                  "target is not WinRE, ESP, Boot 2 or Recovery."
+                : "TARGET validation failed.",
+            observedBoot1,
+            reportGate);
+    }
+
+    private sealed record TargetIdentification(
+        bool Passed,
+        string Summary,
+        PartitionIdentity? ObservedBoot1,
+        ValidationReport Report)
+    {
+        public string Describe() => Report.Describe();
+
+        public static TargetIdentification Failed(ValidationReport report) =>
+            new(false, "TARGET validation failed.", null, report);
     }
 
     private void SafeMarkFailed(RetirementState state, string error)

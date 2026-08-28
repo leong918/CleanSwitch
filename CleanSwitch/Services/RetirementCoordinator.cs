@@ -28,8 +28,16 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
 
     public RetirementState? TryLoad() => _store.TryLoad();
 
-    public RetirementState BeginRetirement(string boot1Id, string boot2Id, string recoveryId)
+    public RetirementState BeginRetirement(
+        string boot1Id,
+        string boot2Id,
+        string recoveryId,
+        PartitionIdentity boot1Identity,
+        PartitionIdentity boot2Identity)
     {
+        ArgumentNullException.ThrowIfNull(boot1Identity);
+        ArgumentNullException.ThrowIfNull(boot2Identity);
+
         if (string.IsNullOrWhiteSpace(boot1Id) || string.IsNullOrWhiteSpace(boot2Id))
         {
             throw new RetirementStateException(
@@ -40,6 +48,19 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
         {
             throw new RetirementStateException(
                 $"Boot 1 and Boot 2 resolved to the same BCD identifier ({boot1Id}). Refusing to continue.");
+        }
+
+        EnsureStableIdentity(boot1Identity, "Boot 1");
+        EnsureStableIdentity(boot2Identity, "Boot 2");
+
+        if (string.Equals(
+                boot1Identity.GptPartitionId?.Trim(),
+                boot2Identity.GptPartitionId?.Trim(),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new RetirementStateException(
+                $"Boot 1 and Boot 2 resolved to the same GPT partition GUID ({boot1Identity.GptPartitionId}). " +
+                "Refusing to continue.");
         }
 
         var existing = _store.TryLoad();
@@ -65,11 +86,11 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
             CreatedAtUtc = now,
             UpdatedAtUtc = now,
             SchemaVersion = RetirementState.CurrentSchemaVersion,
-            Phase = "2A",
+            Phase = "2B-identify",
             DestructiveDeletionPerformed = false,
             MachineName = Environment.MachineName,
-            // Recorded so a later phase running in WinRE or on Boot 2 can prove it is
-            // looking at the same volume Boot 1 wrote to, without trusting drive letters.
+            Boot1Identity = boot1Identity,
+            Boot2Identity = boot2Identity,
             StateVolumeIdentity = _store.StateVolumeIdentity,
             Transitions =
             [
@@ -78,17 +99,30 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
                     From = RetirementStatus.Pending,
                     To = RetirementStatus.Pending,
                     AtUtc = now,
-                    Reason = "Operation created by the RETIRE SYSTEM action on Boot 1."
+                    Reason = "Operation created by RETIRE SYSTEM on Boot 1 with partition-table identities recorded."
                 }
             ]
         };
 
         _log.Info(
             "coordinator",
-            $"Creating retirement operation: boot1={boot1Id}, boot2={boot2Id}, recovery={recoveryId}, " +
+            $"Creating retirement operation: boot1={boot1Id} [{boot1Identity.Describe()}], " +
+            $"boot2={boot2Id} [{boot2Identity.Describe()}], recovery={recoveryId}, " +
             $"stateVolume=[{state.StateVolumeIdentity?.Describe() ?? "unknown"}].");
         _store.Save(state);
         return state;
+    }
+
+    private static void EnsureStableIdentity(PartitionIdentity identity, string label)
+    {
+        if (identity.HasStableIdentifiers)
+        {
+            return;
+        }
+
+        throw new RetirementStateException(
+            $"{label} partition identity is incomplete: {identity.Describe()}. " +
+            "Need disk number, partition number and GPT unique partition GUID from the partition table.");
     }
 
     public RetirementState Transition(RetirementState state, RetirementStatus target, string reason)

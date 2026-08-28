@@ -187,10 +187,42 @@ public partial class MainForm : Form
                 return;
             }
 
-            statusLabel.Text = "Recording the retirement state...";
+            statusLabel.Text = "Recording Boot 1 and Boot 2 partition identities...";
             Refresh();
 
-            state = services.Coordinator.BeginRetirement(boot1.Identifier, boot2.Identifier, recovery.Identifier);
+            var boot1Identity = await services.BootEntryValidator.TryDescribeBootEntryVolumeAsync(boot1.Identifier);
+            var boot2Identity = await services.BootEntryValidator.TryDescribeBootEntryVolumeAsync(boot2.Identifier);
+            if (boot1Identity is null || !boot1Identity.HasStableIdentifiers)
+            {
+                ShowRetireError(
+                    "Boot 1 partition identity could not be recorded from the partition table, so nothing was " +
+                    "changed and the PC will not restart." + Environment.NewLine + Environment.NewLine +
+                    (boot1Identity?.Describe() ?? "No identity returned."));
+                return;
+            }
+
+            if (boot2Identity is null || !boot2Identity.HasStableIdentifiers)
+            {
+                ShowRetireError(
+                    "Boot 2 partition identity could not be recorded from the partition table, so nothing was " +
+                    "changed and the PC will not restart." + Environment.NewLine + Environment.NewLine +
+                    (boot2Identity?.Describe() ?? "No identity returned."));
+                return;
+            }
+
+            services.Log.Info(
+                "retire-ui",
+                $"Boot 1 identity: {boot1Identity.Describe()}");
+            services.Log.Info(
+                "retire-ui",
+                $"Boot 2 identity: {boot2Identity.Describe()}");
+
+            state = services.Coordinator.BeginRetirement(
+                boot1.Identifier,
+                boot2.Identifier,
+                recovery.Identifier,
+                boot1Identity,
+                boot2Identity);
 
             statusLabel.Text = "Setting the recovery environment as the next boot...";
             Refresh();

@@ -1,9 +1,8 @@
 # Tasks left
 
-Last updated 2026-08-28. Code on `main` is `e8c04c8`.
+Last updated 2026-08-28. Phase 2A passed on hardware. Phase 2B identification is in code; deletion is still off.
 
-Deletion of Boot 1 is **not** in the current build. Do not treat RETIRE SYSTEM as
-a wipe. Today it only hands off Boot 1 → WinRE → Boot 2.
+Deletion of Boot 1 is **not** in the current build.
 
 | Status | Meaning |
 | --- | --- |
@@ -13,9 +12,9 @@ a wipe. Today it only hands off Boot 1 → WinRE → Boot 2.
 
 ## Now — before any retirement test
 
-1. **Open.** Set `CleanSwitch:RecoveryDataVolumeGptId` in `appsettings.json` to Boot 2's GPT partition GUID `{4a16be66-dfc5-4b2a-bf95-a7d7d4d2e6fb}`. It is still empty in the committed file. Without it, the state file is resolved from the letter `D:`, which is wrong once WinRE or Boot 2 remaps letters.
-2. **Open.** Rebuild the self-contained exe after that config change, and copy `CleanSwitch.exe` + `appsettings.json` to a folder on Boot 2's volume (currently staged at `D:\CleanSwitchRecovery`). WinRE has no .NET 8 runtime, so the framework-dependent `dotnet run` build will not start there.
-3. **Open.** Run the Phase 2A manual test in `docs/PHASE-2A-MANUAL-TEST.md`. Prove the state file, validators, and two reboots work. Nothing should be deleted. Both Windows installs must still boot afterwards.
+1. **Done.** `RecoveryDataVolumeGptId` is `{4a16be66-dfc5-4b2a-bf95-a7d7d4d2e6fb}`.
+2. **Done.** Self-contained exe staged at `D:\CleanSwitchRecovery`.
+3. **Done.** Phase 2A manual test passed: both boots remain, BCD intact, `COMPLETE`, `destructiveDeletionPerformed: false`.
 
 ## Phase 2A leftovers
 
@@ -25,11 +24,11 @@ a wipe. Today it only hands off Boot 1 → WinRE → Boot 2.
 5. **Open.** Confirm `--list-volumes` in WinRE still reports Boot 2 as `{4a16be66-dfc5-4b2a-bf95-a7d7d4d2e6fb}` (letter may differ). That is the proof the GPT locator survived the reboot.
 6. **Open.** After a successful run, keep exactly one `retirement-state.json` on Boot 2's volume, with `status: COMPLETE` and `destructiveDeletionPerformed: false`.
 
-## Phase 2B — retire Boot 1 (do not start until 2A is proven)
+## Phase 2B — retire Boot 1
 
-7. **Blocked** on item 3. Record Boot 1's `PartitionIdentity` (disk number, partition number, GPT GUID) at `PENDING` time, not from a drive letter.
-8. **Blocked** on item 7. Make `DiskValidator.ValidateRetirementTarget` a hard gate: at least two independent identifiers must agree, and the target must not be the running OS, ESP, Boot 2, or either Recovery partition.
-9. **Blocked** on item 8. Implement the actual removal in `Recovery/RetirementExecutor.cs`. Today every entry point throws. Keep all three guards (`DestructiveOperationsImplemented`, `explicitOptIn`, `EnableDestructiveRetirement`). Flip the hard-coded flag only after review on this test PC.
+7. **Done (identify only).** Boot 1 and Boot 2 `PartitionIdentity` (disk, partition, GPT GUID) are recorded at PENDING. WinRE looks them up by GPT GUID, not drive letter.
+8. **Done (gate only).** `DiskValidator.ValidateRetirementTarget` is a hard gate: disk+partition and GPT id must agree; target must not be the running volume, ESP, MSR, Recovery, or Boot 2. Passing prints `TARGET_VALIDATED`. Deletion is still not implemented.
+9. **Open.** Implement the actual removal in `Recovery/RetirementExecutor.cs`. Today every entry point throws. Keep all three guards (`DestructiveOperationsImplemented`, `explicitOptIn`, `EnableDestructiveRetirement`). Flip the hard-coded flag only after review on this test PC.
 10. **Blocked** on item 9. Prove resume: power loss between `BOOT1_RETIRED` and `VERIFIED` must not delete again. `destructiveDeletionPerformed` exists for this.
 11. **Blocked** on item 9. Set `"phase": "2B"` only on newly created state files after 2B is live.
 
