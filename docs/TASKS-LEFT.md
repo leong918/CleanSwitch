@@ -1,8 +1,8 @@
 # Tasks left
 
-Last updated 2026-08-28. Phase 2A passed on hardware. Phase 2B identification is in code; deletion is still off.
+Last updated 2026-08-28. Phase 2A passed on hardware. Phase 2B identification passed. Deletion plan is report-only; live delete is still off.
 
-Deletion of Boot 1 is **not** in the current build.
+Live deletion of Boot 1 is **not** in the current build. `--recovery-dry-run` prints the partition that would be removed.
 
 | Status | Meaning |
 | --- | --- |
@@ -28,9 +28,9 @@ Deletion of Boot 1 is **not** in the current build.
 
 7. **Done (identify only).** Boot 1 and Boot 2 `PartitionIdentity` (disk, partition, GPT GUID) are recorded at PENDING. WinRE looks them up by GPT GUID, not drive letter.
 8. **Done (gate only).** `DiskValidator.ValidateRetirementTarget` is a hard gate: disk+partition and GPT id must agree; target must not be the running volume, ESP, MSR, Recovery, or Boot 2. Passing prints `TARGET_VALIDATED`. Deletion is still not implemented.
-9. **Open.** Implement the actual removal in `Recovery/RetirementExecutor.cs`. Today every entry point throws. Keep all three guards (`DestructiveOperationsImplemented`, `explicitOptIn`, `EnableDestructiveRetirement`). Flip the hard-coded flag only after review on this test PC.
-10. **Blocked** on item 9. Prove resume: power loss between `BOOT1_RETIRED` and `VERIFIED` must not delete again. `destructiveDeletionPerformed` exists for this.
-11. **Blocked** on item 9. Set `"phase": "2B"` only on newly created state files after 2B is live.
+9. **Done (plan only).** `RetirementExecutor` names the Boot 1 partition (disk, partition, GPT unique id, size) and the diskpart script that would remove it. `RetireBoot1Async` still refuses. `DestructiveOperationsImplemented` and `EnableDestructiveRetirement` remain false. No diskpart process is started. Review the dry-run plan on this PC before any later live-delete work.
+10. **Blocked** on live deletion (not on the plan). Prove resume: power loss between `BOOT1_RETIRED` and `VERIFIED` must not delete again. `destructiveDeletionPerformed` exists for this.
+11. **Blocked** on live deletion. Set `"phase": "2B"` only on newly created state files after live 2B is enabled.
 
 ## Phase 2C — BCD cleanup and space
 
