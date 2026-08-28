@@ -1,0 +1,14 @@
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.pfx
+id_rsa
+id_ed25519
+ssh/id_ed25519
+*.pem
+.env
+.env.*
