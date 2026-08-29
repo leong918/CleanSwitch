@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp into the build (no leading "v"). Dispatch runs build and upload a workflow artifact only; they never create a GitHub Release.'
+        required: false
+        default: '0.0.0-dev'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # net8.0-windows + UseWindowsForms cannot be built on Linux runners.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Values are passed through env rather than inlined into the script body so
+      # that a crafted tag name cannot inject PowerShell.
+      - name: Resolve version
+        id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $version = if ($env:REF_TYPE -eq 'tag') { $env:REF_NAME -replace '^v', '' } else { $env:INPUT_VERSION }
+          if ([string]::IsNullOrWhiteSpace($version)) { $version = '0.0.0-dev' }
+          if ($version -notmatch '^[0-9A-Za-z.\-+]+$') { throw "Refusing to build unexpected version string '$version'." }
+
+          # AssemblyVersion/FileVersion accept numeric quads only, so drop any
+          # -prerelease / +build metadata and pad out to four parts. The @() is
+          # load-bearing: without it a single-part version stays a string and
+          # += would concatenate instead of appending.
+          $parts = @((($version -split '[-+]')[0] -split '\.') | Where-Object { $_ -match '^\d+$' })
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $assemblyVersion = ($parts[0..3]) -join '.'
+
+          $isPrerelease = if ($version -match '-') { 'true' } else { 'false' }
+
+          "version=$version"                 >> $env:GITHUB_OUTPUT
+          "assembly_version=$assemblyVersion" >> $env:GITHUB_OUTPUT
+          "prerelease=$isPrerelease"          >> $env:GITHUB_OUTPUT
+          "zip=CleanSwitch-$version-win-x64.zip" >> $env:GITHUB_OUTPUT
+          "artifact=CleanSwitch-$version-win-x64" >> $env:GITHUB_OUTPUT
+
+          Write-Host "version=$version assemblyVersion=$assemblyVersion prerelease=$isPrerelease"
+
+      # Publish settings are supplied on the command line instead of in
+      # CleanSwitch.csproj so that day-to-day F5 builds stay unaffected.
+      #
+      # PublishReadyToRun is deliberately OFF: measured on this project it adds
+      # ~16 MB to the exe (154 -> 170 MB) and ~4 MB to the zip, while the
+      # startup win is negligible because the framework assemblies already ship
+      # ReadyToRun and the app's own code is small. The UAC elevation prompt
+      # dominates perceived launch time anyway.
+      #
+      # EnableCompressionInSingleFile is ON: it shrinks the on-disk exe from
+      # 154 MB to ~68 MB. It does not meaningfully shrink the zip (the zip
+      # compresses either way), but it is what the user is left with after
+      # extracting, so it is worth the small brotli decompression cost at launch.
+      - name: Publish (self-contained, single-file, win-x64)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ASSEMBLY_VERSION: ${{ steps.ver.outputs.assembly_version }}
+        run: |
+          dotnet publish CleanSwitch/CleanSwitch.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:Version=$env:VERSION `
+            -p:AssemblyVersion=$env:ASSEMBLY_VERSION `
+            -p:FileVersion=$env:ASSEMBLY_VERSION `
+            -o publish
+
+      # CleanSwitch reads Path.Combine(AppContext.BaseDirectory, "appsettings.json")
+      # and throws when it is missing. Under single-file publish BaseDirectory is
+      # the folder holding the exe, so appsettings.json must be a loose file
+      # next to it. Fail the build loudly if that ever stops being true.
+      - name: Verify publish output
+        run: |
+          $exe = Get-Item publish/CleanSwitch.exe -ErrorAction Stop
+          if (-not (Test-Path publish/appsettings.json)) {
+            throw 'appsettings.json was not emitted next to CleanSwitch.exe; the app would throw at startup.'
+          }
+
+          $strays = Get-ChildItem publish -Recurse -File -Filter '*.dll'
+          if ($strays) {
+            throw "Publish is not single-file; found loose assemblies: $($strays.Name -join ', ')"
+          }
+
+          Write-Host ('CleanSwitch.exe: {0:N1} MB' -f ($exe.Length / 1MB))
+          Get-ChildItem publish -Recurse -File |
+            Select-Object Name, @{ n = 'MB'; e = { [math]::Round($_.Length / 1MB, 2) } } |
+            Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Package zip
+        env:
+          ZIP: ${{ steps.ver.outputs.zip }}
+        run: |
+          Compress-Archive `
+            -Path publish/CleanSwitch.exe, publish/appsettings.json `
+            -DestinationPath $env:ZIP `
+            -CompressionLevel Optimal
+          Write-Host ('{0}: {1:N1} MB' -f $env:ZIP, ((Get-Item $env:ZIP).Length / 1MB))
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.artifact }}
+          path: ${{ steps.ver.outputs.zip }}
+          if-no-files-found: error
+          retention-days: 14
+
+      # Strictly a tag *push*. workflow_dispatch can also target a tag ref, and a
+      # manual run must never publish a release.
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          ZIP: ${{ steps.ver.outputs.zip }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          # An array rather than a here-string: a here-string terminator has to
+          # sit at column 0, which would break this YAML block scalar.
+          # Single-quoted entries keep backticks literal for markdown.
+          $notes = @(
+            "CleanSwitch $env:VERSION - self-contained, single-file build for Windows x64."
+            ''
+            "**Download ``$env:ZIP``, then extract both files into the same folder.**"
+            ''
+            '- `CleanSwitch.exe` and `appsettings.json` must stay side by side. The app reads'
+            '  its configuration from the folder containing the exe and refuses to start if'
+            '  `appsettings.json` is missing.'
+            '- No .NET runtime install is required; the runtime is bundled into the exe.'
+            '- The app requests administrator rights, so Windows shows a UAC prompt.'
+            '- CleanSwitch modifies Windows boot configuration. Review `appsettings.json`'
+            '  (in particular `Boot2Guid` and `EnableDestructiveRetirement`) before running'
+            '  it on a machine you care about.'
+          )
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+
+          $ghArgs = @(
+            $env:TAG, $env:ZIP,
+            '--title',      "CleanSwitch $env:VERSION",
+            '--notes-file', 'release-notes.md',
+            '--verify-tag'
+          )
+          if ($env:PRERELEASE -eq 'true') { $ghArgs += '--prerelease' }
+
+          gh release create @ghArgs

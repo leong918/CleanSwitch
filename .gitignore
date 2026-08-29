@@ -12,3 +12,8 @@ ssh/id_ed25519
 *.pem
 .env
 .env.*
+
+# Release publish output (see scripts/publish-release.ps1 and docs/RELEASING.md)
+/artifacts/
+/publish/
+CleanSwitch-*-win-x64.zip

@@ -7,6 +7,17 @@ namespace CleanSwitch.Services;
 
 public sealed class WindowsBootManager : IBootManager
 {
+    private readonly IOperationLog _log;
+
+    /// <param name="log">
+    /// Persistent audit log. Every bcdedit and shutdown invocation is written to it with
+    /// its exit code and captured output, so the flow can be reconstructed after a reboot.
+    /// </param>
+    public WindowsBootManager(IOperationLog? log = null)
+    {
+        _log = log ?? NullOperationLog.Instance;
+    }
+
     public async Task<BootLayout> DetectAsync(string? preferredOtherGuid)
     {
         var currentOutput = await ReadBcdEditOutputAsync(["/enum", "{current}", "/v"]);
@@ -74,7 +85,55 @@ public sealed class WindowsBootManager : IBootManager
         }
 
         Trace.WriteLine($"BCDEdit successfully set the next one-time boot target to {normalizedGuid}.");
+        _log.Info("bcdedit", $"One-time boot sequence set to {normalizedGuid}.");
         return true;
+    }
+
+    public async Task<IReadOnlyList<BcdEntry>> EnumerateAsync(string scope)
+    {
+        if (string.IsNullOrWhiteSpace(scope))
+        {
+            throw new BootManagerException("A BCD enumeration scope is required.");
+        }
+
+        var output = await ReadBcdEditOutputAsync(["/enum", scope.Trim(), "/v"]);
+        return ParseEntries(output).Select(ToBcdEntry).ToList();
+    }
+
+    public async Task<BcdEntry?> TryGetEntryAsync(string bootGuid)
+    {
+        var normalizedGuid = NormalizeBootGuid(bootGuid);
+        var result = await RunProcessAsync("bcdedit.exe", ["/enum", normalizedGuid, "/v"]);
+        if (result.ExitCode != 0)
+        {
+            _log.Warn(
+                "bcdedit",
+                $"BCD identifier {normalizedGuid} could not be read." + FormatProcessOutput(result));
+            return null;
+        }
+
+        var entries = ParseEntries(result.StdOut);
+        var match = entries.FirstOrDefault(entry => IdsEqual(entry.Identifier, normalizedGuid))
+            ?? entries.FirstOrDefault();
+
+        if (match is null)
+        {
+            // bcdedit can print output in an encoding the default reader mangles; retry the
+            // encoding fallback path before concluding the entry is unreadable.
+            try
+            {
+                var fallbackOutput = await ReadBcdEditOutputAsync(["/enum", normalizedGuid, "/v"]);
+                match = ParseEntries(fallbackOutput)
+                    .FirstOrDefault(entry => IdsEqual(entry.Identifier, normalizedGuid));
+            }
+            catch (BootManagerException exception)
+            {
+                _log.Warn("bcdedit", $"Encoding fallback for {normalizedGuid} failed: {exception.Message}");
+                return null;
+            }
+        }
+
+        return match is null ? null : ToBcdEntry(match);
     }
 
     public async Task RestartAsync(int delaySeconds)
@@ -96,6 +155,7 @@ public sealed class WindowsBootManager : IBootManager
         }
 
         Trace.WriteLine("Windows restart successfully scheduled.");
+        _log.Info("restart", $"Restart scheduled in {delaySeconds} second(s).");
     }
 
     private static ParsedEntry SelectTarget(
@@ -167,7 +227,7 @@ public sealed class WindowsBootManager : IBootManager
             "BCDEdit ran, but no Windows boot entries could be parsed from its output.");
     }
 
-    private static async Task<ProcessResult> RunProcessAsync(
+    private async Task<ProcessResult> RunProcessAsync(
         string fileName,
         IEnumerable<string> arguments,
         Encoding? encoding = null)
@@ -189,7 +249,9 @@ public sealed class WindowsBootManager : IBootManager
             startInfo.ArgumentList.Add(argument);
         }
 
+        var commandLine = $"{fileName} {string.Join(" ", argumentList)}";
         Trace.WriteLine($"Executing {fileName} with arguments: {string.Join(" ", argumentList)}.");
+        _log.Info("process", $"Executing: {commandLine}");
 
         using var process = new Process { StartInfo = startInfo };
         try
@@ -216,6 +278,12 @@ public sealed class WindowsBootManager : IBootManager
         Trace.WriteLine(
             $"{fileName} completed. ExitCode={result.ExitCode}, " +
             $"StdOut={FormatForLog(result.StdOut)}, StdErr={FormatForLog(result.StdErr)}.");
+
+        _log.Write(
+            result.ExitCode == 0 ? OperationLogLevel.Info : OperationLogLevel.Warning,
+            "process",
+            $"Completed: {commandLine} | exitCode={result.ExitCode} | stdout={FormatForLog(result.StdOut)} | " +
+            $"stderr={FormatForLog(result.StdErr)}");
 
         return result;
     }
@@ -260,6 +328,10 @@ public sealed class WindowsBootManager : IBootManager
             {
                 current.Path = path;
             }
+            else
+            {
+                CaptureExtraProperty(current, line);
+            }
         }
 
         if (current is not null)
@@ -287,6 +359,40 @@ public sealed class WindowsBootManager : IBootManager
         value = rest.Trim();
         return value.Length > 0;
     }
+
+    /// <summary>
+    /// Captures the extra fields the recovery-side validators need. Only a whitelist is
+    /// read, so unexpected or wrapped bcdedit lines cannot disturb parsing.
+    /// </summary>
+    private static void CaptureExtraProperty(ParsedEntry entry, string line)
+    {
+        if (TryGetProperty(line, "device", out var device))
+        {
+            entry.Device = device;
+        }
+        else if (TryGetProperty(line, "osdevice", out var osDevice))
+        {
+            entry.OsDevice = osDevice;
+        }
+        else if (TryGetProperty(line, "recoverysequence", out var recoverySequence))
+        {
+            entry.RecoverySequence = NormalizeIdentifier(recoverySequence);
+        }
+        else if (TryGetProperty(line, "type", out var type))
+        {
+            entry.Type = type;
+        }
+    }
+
+    private static BcdEntry ToBcdEntry(ParsedEntry entry) =>
+        new(
+            entry.Identifier,
+            entry.Description.Trim(),
+            entry.Path.Trim(),
+            entry.Device.Trim(),
+            entry.OsDevice.Trim(),
+            entry.RecoverySequence.Trim(),
+            entry.Type.Trim());
 
     private static bool IsSwitchableWindows(ParsedEntry entry)
     {
@@ -366,6 +472,14 @@ public sealed class WindowsBootManager : IBootManager
         public string Description { get; set; } = string.Empty;
 
         public string Path { get; set; } = string.Empty;
+
+        public string Device { get; set; } = string.Empty;
+
+        public string OsDevice { get; set; } = string.Empty;
+
+        public string RecoverySequence { get; set; } = string.Empty;
+
+        public string Type { get; set; } = string.Empty;
     }
 
     private sealed record ProcessResult(int ExitCode, string StdOut, string StdErr);

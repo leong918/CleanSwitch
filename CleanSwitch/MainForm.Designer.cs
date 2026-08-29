@@ -11,6 +11,7 @@ partial class MainForm
     private Label targetHeadingLabel = null!;
     private Label targetValueLabel = null!;
     private Button switchButton = null!;
+    private Button retireButton = null!;
     private Label statusLabel = null!;
 
     protected override void Dispose(bool disposing)
@@ -31,6 +32,7 @@ partial class MainForm
         targetHeadingLabel = new Label();
         targetValueLabel = new Label();
         switchButton = new Button();
+        retireButton = new Button();
         statusLabel = new Label();
         SuspendLayout();
 
@@ -81,18 +83,30 @@ partial class MainForm
         switchButton.Enabled = false;
         switchButton.Click += SwitchButton_Click;
 
+        retireButton.Font = new Font("Segoe UI", 11F, FontStyle.Bold);
+        retireButton.ForeColor = Color.FromArgb(150, 30, 30);
+        retireButton.Location = new Point(36, 284);
+        retireButton.Name = "retireButton";
+        retireButton.Size = new Size(348, 44);
+        retireButton.TabIndex = 1;
+        retireButton.Text = "RETIRE SYSTEM";
+        retireButton.UseVisualStyleBackColor = true;
+        retireButton.Enabled = false;
+        retireButton.Click += RetireButton_Click;
+
         statusLabel.AutoSize = false;
         statusLabel.Font = new Font("Segoe UI", 9F);
         statusLabel.ForeColor = Color.FromArgb(70, 70, 70);
-        statusLabel.Location = new Point(36, 284);
+        statusLabel.Location = new Point(36, 340);
         statusLabel.Name = "statusLabel";
-        statusLabel.Size = new Size(348, 40);
+        statusLabel.Size = new Size(348, 68);
         statusLabel.Text = string.Empty;
 
         AutoScaleDimensions = new SizeF(7F, 15F);
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(420, 340);
+        ClientSize = new Size(420, 424);
         Controls.Add(statusLabel);
+        Controls.Add(retireButton);
         Controls.Add(switchButton);
         Controls.Add(targetValueLabel);
         Controls.Add(targetHeadingLabel);

@@ -22,12 +22,29 @@ internal static class AppConfiguration
         var settings = JsonSerializer.Deserialize<AppSettingsFile>(json, JsonOptions)
             ?? throw new InvalidOperationException("appsettings.json could not be parsed.");
 
-        if (settings.CleanSwitch.RestartDelaySeconds < 0)
+        var options = settings.CleanSwitch;
+
+        if (options.RestartDelaySeconds < 0)
         {
             throw new InvalidOperationException("CleanSwitch:RestartDelaySeconds must be zero or greater.");
         }
 
-        return settings.CleanSwitch;
+        if (!string.IsNullOrWhiteSpace(options.RecoveryGuid) &&
+            !Guid.TryParse(options.RecoveryGuid.Trim(), out _))
+        {
+            throw new InvalidOperationException(
+                $"CleanSwitch:RecoveryGuid '{options.RecoveryGuid}' is not a BCD GUID. " +
+                "Expected a value like {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}. " +
+                "Find it with 'bcdedit /enum all /v' from an elevated prompt, or leave it empty to let " +
+                "CleanSwitch read the running entry's recoverysequence.");
+        }
+
+        if (string.IsNullOrWhiteSpace(options.StateFileName))
+        {
+            options.StateFileName = CleanSwitchOptions.DefaultStateFileName;
+        }
+
+        return options;
     }
 
     private sealed class AppSettingsFile
