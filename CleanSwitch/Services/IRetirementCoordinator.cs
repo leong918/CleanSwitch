@@ -15,8 +15,17 @@ public interface IRetirementCoordinator
 
     RetirementState? TryLoad();
 
-    /// <summary>Creates and persists a fresh PENDING record. Refuses to overwrite an operation in flight.</summary>
-    RetirementState BeginRetirement(string boot1Id, string boot2Id, string recoveryId);
+    /// <summary>
+    /// Creates and persists a fresh PENDING record with Boot 1 / Boot 2 partition
+    /// identities already filled from the partition table. Refuses to overwrite an
+    /// operation in flight. Refuses if either identity is incomplete or they collide.
+    /// </summary>
+    RetirementState BeginRetirement(
+        string boot1Id,
+        string boot2Id,
+        string recoveryId,
+        PartitionIdentity boot1Identity,
+        PartitionIdentity boot2Identity);
 
     /// <summary>Applies a validated transition and persists it. Illegal transitions throw.</summary>
     RetirementState Transition(RetirementState state, RetirementStatus target, string reason);

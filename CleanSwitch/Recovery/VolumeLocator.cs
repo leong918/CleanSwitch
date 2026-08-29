@@ -119,6 +119,7 @@ public sealed class LocatedVolume
         PartitionNumber = PartitionNumber,
         VolumeGuidPath = VolumeGuidPath,
         GptPartitionId = GptPartitionId,
+        GptPartitionType = GptPartitionType is null ? null : VolumeLocator.FormatGptId(GptPartitionType.Value),
         ObservedDriveLetter = PrimaryMountPoint,
         Source = source
     };
@@ -199,6 +200,35 @@ public static class VolumeLocator
     {
         gptPartitionId = Guid.Empty;
         return !string.IsNullOrWhiteSpace(raw) && Guid.TryParse(raw.Trim(), out gptPartitionId);
+    }
+
+    /// <summary>
+    /// Finds exactly one volume whose GPT unique partition GUID matches.
+    /// Zero matches or two-or-more matches both fail: ambiguity must not pick a target.
+    /// </summary>
+    public static LocatedVolume? TryFindUniqueByGptId(Guid gptPartitionId, out string? error)
+    {
+        var located = Enumerate();
+        var matches = located.WithGptPartitionId(gptPartitionId);
+        if (matches.Count == 0)
+        {
+            error =
+                $"No volume on this machine has GPT partition GUID {FormatGptId(gptPartitionId)}. " +
+                "The partition may be missing, or this environment cannot read the partition table.";
+            return null;
+        }
+
+        if (matches.Count > 1)
+        {
+            var listed = string.Join("; ", matches.Select(volume => volume.Describe()));
+            error =
+                $"GPT partition GUID {FormatGptId(gptPartitionId)} matched {matches.Count} volumes. " +
+                "Refusing to choose. Matches: " + listed;
+            return null;
+        }
+
+        error = null;
+        return matches[0];
     }
 
     /// <summary>

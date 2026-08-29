@@ -24,16 +24,13 @@ public static class RetirementStateMachine
     ];
 
     /// <summary>
-    /// Phase 2A runs a shortened, non-destructive route. These edges are declared
-    /// explicitly so that "skipping deletion" is an auditable decision instead of a
-    /// silently tolerated gap in the sequence.
+    /// Phase 2B-identify still skips deletion. TARGET_VALIDATED is required.
+    /// BOOT1_RETIRED is skipped because deletion is not implemented.
     /// </summary>
     private static readonly (RetirementStatus From, RetirementStatus To, string Why)[] Phase2ASkipEdges =
     [
-        (RetirementStatus.RecoveryStarted, RetirementStatus.Boot2Validated,
-            "Phase 2A: no partition is deleted, so the deletion target is only reported, never validated for destruction."),
         (RetirementStatus.Boot2Validated, RetirementStatus.BcdUpdated,
-            "Phase 2A: BOOT1_RETIRED is skipped because Phase 2A never retires anything.")
+            "Phase 2B-identify: BOOT1_RETIRED is skipped because deletion is not implemented.")
     ];
 
     private static readonly Dictionary<RetirementStatus, HashSet<RetirementStatus>> Allowed = BuildTable();

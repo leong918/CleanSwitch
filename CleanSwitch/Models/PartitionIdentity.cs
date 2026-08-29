@@ -20,6 +20,12 @@ public sealed class PartitionIdentity
     /// <summary>GPT unique partition GUID from the partition table.</summary>
     public string? GptPartitionId { get; set; }
 
+    /// <summary>
+    /// GPT partition type GUID (EFI System, Basic Data, Microsoft Recovery, ...).
+    /// Used to refuse ESP / Recovery / MSR targets. Not a unique identity.
+    /// </summary>
+    public string? GptPartitionType { get; set; }
+
     /// <summary>Raw BCD <c>device</c> / <c>osdevice</c> text, e.g. <c>partition=D:</c> or <c>unknown</c>.</summary>
     public string? BcdDevice { get; set; }
 
@@ -31,7 +37,8 @@ public sealed class PartitionIdentity
 
     /// <summary>
     /// True when at least two independent, reboot-stable identifiers are present.
-    /// A single identifier is not enough to authorise a destructive action.
+    /// Win32 volume GUIDs are not counted: WinPE assigns new ones, so they are not
+    /// stable across Boot 1 / WinRE / Boot 2. Drive letters are never counted.
     /// </summary>
     public bool HasStableIdentifiers => StableIdentifierCount >= 2;
 
@@ -41,11 +48,6 @@ public sealed class PartitionIdentity
         {
             var count = 0;
             if (DiskNumber is not null && PartitionNumber is not null)
-            {
-                count++;
-            }
-
-            if (!string.IsNullOrWhiteSpace(VolumeGuidPath))
             {
                 count++;
             }
@@ -75,6 +77,11 @@ public sealed class PartitionIdentity
         if (!string.IsNullOrWhiteSpace(GptPartitionId))
         {
             parts.Add($"gptId={GptPartitionId}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(GptPartitionType))
+        {
+            parts.Add($"gptType={GptPartitionType}");
         }
 
         if (!string.IsNullOrWhiteSpace(BcdDevice))

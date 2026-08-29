@@ -257,6 +257,9 @@ public sealed class BootEntryValidator
         identity.DiskNumber = match.DiskNumber;
         identity.PartitionNumber = match.PartitionNumber;
         identity.GptPartitionId = match.GptPartitionId;
+        identity.GptPartitionType = match.GptPartitionType is null
+            ? null
+            : VolumeLocator.FormatGptId(match.GptPartitionType.Value);
         identity.ObservedDriveLetter = match.PrimaryMountPoint ?? mountPoint;
         identity.Source =
             $"BCD entry {entryIdentifier}, device '{bcdDevice}' resolved through the drive letter as seen by " +
