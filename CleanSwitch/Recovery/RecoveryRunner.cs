@@ -24,9 +24,10 @@ public sealed record RecoveryRunResult(RecoveryRunOutcome Outcome, string Messag
 /// The recovery-side half of the retirement flow. Invoked with <c>--recovery-run</c> (or
 /// <c>--recovery-dry-run</c>) from a recovery environment command prompt.
 /// <para>
-/// PHASE 2A BEHAVIOUR: load the state file, mark that recovery started, validate the Boot 2
-/// entry, SKIP DELETION ENTIRELY, point the next boot at Boot 2 and restart. Nothing is
-/// deleted, formatted or removed. <see cref="RetirementExecutor"/> is never called.
+/// PHASE 2B-plan BEHAVIOUR: load the state file, hard-gate target identity, print a
+/// report-only deletion plan, SKIP LIVE DELETION, point the next boot at Boot 2 and
+/// restart. Nothing is deleted, formatted or removed. <see cref="RetirementExecutor.RetireBoot1Async"/>
+/// is not called.
 /// </para>
 /// </summary>
 public sealed class RecoveryRunner
@@ -63,7 +64,7 @@ public sealed class RecoveryRunner
     /// </param>
     public async Task<RecoveryRunResult> RunAsync(bool dryRun)
     {
-        _log.Info("recovery", $"Recovery-side run starting. dryRun={dryRun}, phase=2B-identify (non-destructive).");
+        _log.Info("recovery", $"Recovery-side run starting. dryRun={dryRun}, phase=2B-plan (non-destructive).");
 
         RetirementState? state;
         try
@@ -101,7 +102,7 @@ public sealed class RecoveryRunner
         }
         catch (RetirementNotImplementedException exception)
         {
-            // Phase 2A must never reach the executor. If it somehow does, stop hard.
+            // Live deletion must never run in this build. If RetireBoot1Async is reached, stop hard.
             SafeMarkFailed(loaded, "Destructive path was reached in Phase 2A: " + exception.Message);
             _log.Warn("recovery", $"REFUSED: {exception.Message}");
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, exception.Message);
@@ -175,10 +176,29 @@ public sealed class RecoveryRunner
         _log.Info("recovery", "TARGET_VALIDATED");
         _log.Info("recovery", identification.Describe());
 
+        if (state.Boot1Identity is null || identification.ObservedBoot1 is null)
+        {
+            var message =
+                "TARGET_VALIDATED was recorded without Boot 1 identities. Refusing to continue. " +
+                "No partition was changed.";
+            _coordinator.MarkFailed(state, message);
+            return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
+        }
+
+        var deletionPlan = _executor.BuildDeletionPlan(
+            expectedBoot1: state.Boot1Identity,
+            observedBoot1: identification.ObservedBoot1,
+            boot2: state.Boot2Identity,
+            validation: identification.Report,
+            explicitOptIn: false,
+            boot1BcdId: state.Boot1Id);
+        _log.Info("recovery", deletionPlan.Describe());
+
         if (dryRun)
         {
             var dryRunMessage =
                 "TARGET_VALIDATED" + Environment.NewLine + identification.Describe() + Environment.NewLine +
+                deletionPlan.Describe() + Environment.NewLine +
                 "Dry run: deletion was not attempted and the BCD was not changed.";
             return new RecoveryRunResult(RecoveryRunOutcome.DryRunCompleted, dryRunMessage);
         }
@@ -199,15 +219,16 @@ public sealed class RecoveryRunner
             state = _coordinator.Transition(
                 state,
                 RetirementStatus.Boot2Validated,
-                "Boot 2 BCD entry validated. Deletion remains NOT IMPLEMENTED.");
+                "Boot 2 BCD entry validated. Live deletion remains disabled; the deletion plan was reported only.");
         }
 
-        // ---- Deletion: still not implemented. ----
+        // ---- Deletion: plan was reported above. Live diskpart is not invoked. ----
         _log.Warn(
             "recovery",
-            "PHASE 2B-identify: Boot 1 deletion is SKIPPED. RetirementExecutor is not called, no partition is " +
+            "PHASE 2B-plan: Boot 1 deletion is SKIPPED. RetireBoot1Async is not called, no partition is " +
             "touched, and no BCD entry is removed. " +
-            $"Destructive implementation available={_executor.IsDestructiveRetirementAvailable}.");
+            $"Destructive implementation available={_executor.IsDestructiveRetirementAvailable} " +
+            $"executionAuthorised={deletionPlan.ExecutionAuthorised}.");
 
         // ---- Hand off to Boot 2. ----
         await _bootManager.SetNextBootAsync(state.Boot2Id);
@@ -244,7 +265,8 @@ public sealed class RecoveryRunner
         return new RecoveryRunResult(
             RecoveryRunOutcome.HandoffScheduled,
             $"Boot 2 ({state.Boot2Id}) set as the next boot and a restart was scheduled in " +
-            $"{_options.RestartDelaySeconds} second(s). Nothing was deleted.");
+            $"{_options.RestartDelaySeconds} second(s). Nothing was deleted." +
+            Environment.NewLine + deletionPlan.Describe());
     }
 
     private TargetIdentification IdentifyTarget(RetirementState state)
