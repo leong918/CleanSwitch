@@ -68,6 +68,9 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
             Phase = "2A",
             DestructiveDeletionPerformed = false,
             MachineName = Environment.MachineName,
+            // Recorded so a later phase running in WinRE or on Boot 2 can prove it is
+            // looking at the same volume Boot 1 wrote to, without trusting drive letters.
+            StateVolumeIdentity = _store.StateVolumeIdentity,
             Transitions =
             [
                 new RetirementTransition
@@ -82,7 +85,8 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
 
         _log.Info(
             "coordinator",
-            $"Creating retirement operation: boot1={boot1Id}, boot2={boot2Id}, recovery={recoveryId}.");
+            $"Creating retirement operation: boot1={boot1Id}, boot2={boot2Id}, recovery={recoveryId}, " +
+            $"stateVolume=[{state.StateVolumeIdentity?.Describe() ?? "unknown"}].");
         _store.Save(state);
         return state;
     }

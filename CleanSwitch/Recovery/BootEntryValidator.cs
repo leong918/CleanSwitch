@@ -182,8 +182,16 @@ public sealed class BootEntryValidator
     }
 
     /// <summary>
-    /// Describes the Boot 1 entry as stable identifiers, using BCD device text rather than
-    /// a drive letter. Phase 2B extends this with the partition table lookup.
+    /// Describes a boot entry as stable identifiers. The BCD <c>device</c> text is always
+    /// recorded; when it carries a <c>partition=X:</c> letter that resolves in the current
+    /// environment, the partition table is also read so disk number, partition number and
+    /// GPT partition GUID are captured.
+    /// <para>
+    /// This is metadata only, and Phase 2A acts on none of it. The letter inside the BCD
+    /// device text is only meaningful in the environment that entry belongs to, so the
+    /// recorded <c>Source</c> says which environment resolved it. Phase 2B must re-verify
+    /// before trusting it.
+    /// </para>
     /// </summary>
     public async Task<PartitionIdentity?> TryDescribeBootEntryVolumeAsync(string bootGuid)
     {
@@ -194,14 +202,103 @@ public sealed class BootEntryValidator
             return null;
         }
 
+        var device = string.IsNullOrWhiteSpace(entry.OsDevice) ? entry.Device : entry.OsDevice;
+
         var identity = new PartitionIdentity
         {
-            BcdDevice = string.IsNullOrWhiteSpace(entry.OsDevice) ? entry.Device : entry.OsDevice,
+            BcdDevice = device,
             Source = $"BCD entry {entry.Identifier}"
         };
 
+        EnrichFromPartitionTable(identity, entry.Identifier, device);
+
         _log.Info("boot-validator", $"BCD device information for {entry.Identifier}: {identity.Describe()}");
         return identity;
+    }
+
+    /// <summary>
+    /// Resolves a BCD <c>partition=X:</c> device to the volume that letter currently means,
+    /// then to that volume's GPT partition identity. Silent no-op when the device text has no
+    /// letter or the letter does not resolve here.
+    /// </summary>
+    private void EnrichFromPartitionTable(PartitionIdentity identity, string entryIdentifier, string? bcdDevice)
+    {
+        var mountPoint = TryExtractPartitionMountPoint(bcdDevice);
+        if (mountPoint is null)
+        {
+            return;
+        }
+
+        var volumeGuidPath = VolumeIdentity.TryGetVolumeGuidPath(mountPoint);
+        if (volumeGuidPath is null)
+        {
+            _log.Info(
+                "boot-validator",
+                $"BCD entry {entryIdentifier} names '{mountPoint}', which does not resolve to a volume in this " +
+                "environment. Drive letters are per-instance, so this is expected outside the entry's own " +
+                "Windows. No partition identity recorded.");
+            return;
+        }
+
+        var located = VolumeLocator.Enumerate();
+        var match = located.Volumes
+            .FirstOrDefault(volume => VolumeIdentity.AreSameVolume(volume.VolumeGuidPath, volumeGuidPath));
+
+        if (match is null)
+        {
+            _log.Warn(
+                "boot-validator",
+                $"Volume '{volumeGuidPath}' for BCD entry {entryIdentifier} was not found in the partition " +
+                "table enumeration, so no disk, partition number or GPT id was recorded.");
+            return;
+        }
+
+        identity.VolumeGuidPath = match.VolumeGuidPath;
+        identity.DiskNumber = match.DiskNumber;
+        identity.PartitionNumber = match.PartitionNumber;
+        identity.GptPartitionId = match.GptPartitionId;
+        identity.ObservedDriveLetter = match.PrimaryMountPoint ?? mountPoint;
+        identity.Source =
+            $"BCD entry {entryIdentifier}, device '{bcdDevice}' resolved through the drive letter as seen by " +
+            "the currently running environment, then through the partition table (metadata only; re-verify " +
+            "before any destructive use)";
+
+        if (match.Outcome != VolumeIdentityOutcome.Identified)
+        {
+            _log.Warn(
+                "boot-validator",
+                $"Partition identity for BCD entry {entryIdentifier} is incomplete ({match.Outcome}): " +
+                $"{match.Diagnostic}");
+        }
+    }
+
+    /// <summary>Pulls <c>X:</c> out of BCD device text such as <c>partition=C:</c>.</summary>
+    private static string? TryExtractPartitionMountPoint(string? bcdDevice)
+    {
+        if (string.IsNullOrWhiteSpace(bcdDevice))
+        {
+            return null;
+        }
+
+        const string marker = "partition=";
+        var start = bcdDevice.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return null;
+        }
+
+        var value = bcdDevice[(start + marker.Length)..].Trim();
+        var end = value.IndexOfAny([' ', ',', ']', ')']);
+        if (end >= 0)
+        {
+            value = value[..end];
+        }
+
+        // Only a plain drive letter is usable. Device paths such as
+        // partition=\Device\HarddiskVolume3 cannot be turned into a filesystem path here.
+        return value.Length == 2 && char.IsLetter(value[0]) && value[1] == ':'
+            ? value + Path.DirectorySeparatorChar
+            : null;
     }
 
     /// <summary>

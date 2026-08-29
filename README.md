@@ -34,6 +34,12 @@ bcdedit /enum ... /v            (read-only)
 
 If any of those fail, Windows is not restarted.
 
+To identify volumes it also issues two read-only device IOCTLs,
+`IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` and `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`, on handles
+opened with zero desired access. These read the partition table. CleanSwitch never mounts,
+unmounts, writes to or formats a volume, and it does not use `diskpart`, `mountvol`,
+`Format-Volume`, `Remove-Partition`, `Clear-Disk` or `Set-Partition`.
+
 The destructive code path does not exist. `Recovery/RetirementExecutor.cs` is a stub whose
 every entry point throws, guarded by a hard-coded `DestructiveOperationsImplemented = false`
 flag, a required `explicitOptIn` argument, and the
@@ -57,7 +63,7 @@ dotnet --info
 
 ```text
 CleanSwitch/
-  Program.cs                       GUI entry point + --recovery-run / --recovery-dry-run
+  Program.cs                       GUI entry point + --recovery-run / --recovery-dry-run / --list-volumes
   MainForm.cs                      Switch button and RETIRE SYSTEM button
   MainForm.Designer.cs
   AppConfiguration.cs
@@ -86,6 +92,7 @@ CleanSwitch/
     RetirementExecutor.cs          NOT IMPLEMENTED destructive stub
     ValidationReport.cs
     VolumeIdentity.cs              Read-only Win32 volume GUID lookups
+    VolumeLocator.cs               Read-only volume -> disk / GPT partition GUID mapping (P/Invoke only)
 ssh/
   id_ed25519.pub
   id_ed25519          (private, gitignored)
@@ -130,6 +137,8 @@ After you confirm, it:
     "RecoveryGuid": "",
     "RestartDelaySeconds": 5,
     "RecoveryDataPath": "D:\\CleanSwitchData",
+    "RecoveryDataVolumeGptId": "",
+    "RecoveryDataFolderName": "CleanSwitchData",
     "StateFileName": "retirement-state.json",
     "LogDirectory": "",
     "AllowStateOnSystemVolume": false,
@@ -143,9 +152,11 @@ After you confirm, it:
 | `Boot2Guid` | Switch + retire | Optional. The other Windows loader. Auto-detected when exactly two Windows Boot Loader entries exist. |
 | `RecoveryGuid` | Retire | BCD identifier of the Windows Recovery Environment entry. When empty, CleanSwitch reads the running entry's `recoverysequence`. Validated before use. |
 | `RestartDelaySeconds` | Both | Delay passed to `shutdown /r /t N`. |
-| `RecoveryDataPath` | Retire | Folder for the retirement state file and logs. Must be on a volume that is **not** Boot 1. No default is assumed; an empty value is an error. |
-| `StateFileName` | Retire | State file name inside `RecoveryDataPath`. |
-| `LogDirectory` | Both | Optional override. Defaults to `{RecoveryDataPath}\logs`. |
+| `RecoveryDataPath` | Retire | Literal folder for the retirement state file and logs. Must be on a volume that is **not** Boot 1. Used only when `RecoveryDataVolumeGptId` is empty. |
+| `RecoveryDataVolumeGptId` | Retire | Optional, empty by default. GPT unique partition GUID of the volume that holds the retirement state file. Preferred over `RecoveryDataPath`, because it is the only identifier that is stable across Boot 1, WinRE and Boot 2. Find it with `--list-volumes`. |
+| `RecoveryDataFolderName` | Retire | Folder name on that volume. Defaults to the last segment of `RecoveryDataPath`, so `D:\CleanSwitchData` yields `CleanSwitchData`. Must be a plain name, not a rooted path. |
+| `StateFileName` | Retire | State file name inside the retirement data folder. |
+| `LogDirectory` | Both | Optional override. Defaults to `<retirement data folder>\logs`. |
 | `AllowStateOnSystemVolume` | Retire | Test-only. Allows the state file to sit on the running Windows volume, which is unsafe for a real retirement. |
 | `EnableDestructiveRetirement` | Reserved | Phase 2B placeholder. Has no effect: the executor throws regardless. |
 
@@ -178,19 +189,66 @@ The retirement state file is the only instruction set that survives the reboot i
 recovery. If its only copy lived on Boot 1's `C:\`, it would be destroyed by the very
 operation it is meant to drive. So:
 
-- The path is configured by `RecoveryDataPath` and has **no** implicit fallback.
 - CleanSwitch resolves the folder to a volume GUID (via read-only Win32 mount-point
   queries) and compares it against the running Windows volume. If they match, the
   retirement flow refuses to start and tells you to choose another volume.
 - The volume must be present when the flow starts, and a write probe must succeed, before
   any state is written or any boot entry is touched.
 - Choose a volume that is also visible from WinRE: a second internal disk, a data
-  partition, or a USB stick. Drive letters differ in WinRE, so pass the path that resolves
-  correctly there, or re-run with the path corrected.
+  partition, or a USB stick.
 
-The shipped value `D:\CleanSwitchData` is a documented placeholder, not a detected
-location. Verify it points at a non-Boot-1 volume on your machine before using
-RETIRE SYSTEM.
+#### Identify the volume by GPT partition GUID, not by letter
+
+A drive letter designates a **different volume** in each environment the retirement flow
+crosses. `D:` is Boot 2 while Boot 1 runs; from Boot 2, `D:` is most likely Boot 1 — the
+volume slated for deletion. Win32 volume GUIDs (`\\?\Volume{...}`) do not help either,
+because WinPE's Mount Manager generates its own set. The only stable on-disk identifier is
+the **GPT unique partition GUID** from the partition table.
+
+So set `RecoveryDataVolumeGptId`:
+
+```powershell
+.\CleanSwitch.exe --list-volumes
+```
+
+Copy the GPT partition GUID of the volume that should hold the state file into
+`RecoveryDataVolumeGptId`, and set `RecoveryDataFolderName` (default `CleanSwitchData`).
+CleanSwitch then resolves that GUID to whatever mount point the volume currently has,
+in every environment, with no per-environment config editing.
+
+Note that `Get-Partition`'s `UniqueId` is **not** the GPT partition GUID — it can be a
+synthetic value that repeats across disks. Use `--list-volumes`, which reads the partition
+table directly.
+
+**Write side** (Boot 1 creating the operation):
+
+1. If `RecoveryDataVolumeGptId` is set, locate that volume, resolve its current mount
+   point, and use `<mount>\<RecoveryDataFolderName>`. If the GUID is configured but the
+   volume is not found, CleanSwitch **fails and stops**. It does not fall back to the
+   letter path, because that fallback could write the state onto the volume being retired.
+2. Otherwise use the literal `RecoveryDataPath`, exactly as older builds did.
+
+Then the safety checks run unchanged: reject the running system volume unless
+`AllowStateOnSystemVolume`, confirm the volume is present, and write-probe the folder.
+
+**Read side** (WinRE, Boot 2):
+
+1. Try the configured resolution above.
+2. If no state file is there, scan every fixed volume for
+   `<volume>\<RecoveryDataFolderName>\<StateFileName>`, parse each candidate, and accept
+   only files whose `operation` is `RETIRE_BOOT1` and whose `schemaVersion` matches.
+3. Exactly one valid candidate is used, and the log says prominently that it was found by
+   scan rather than by configuration, naming the volume. **Two or more** distinct valid
+   candidates is a hard failure that lists them all: ambiguity stops the flow rather than
+   picking one.
+
+When the operation is created, the state volume's disk number, partition number and GPT
+partition GUID are recorded in the state file as `stateVolumeIdentity`, so a later phase
+can prove it is looking at the volume Boot 1 actually wrote to.
+
+The shipped `RecoveryDataPath` value `D:\CleanSwitchData` is a documented placeholder, not
+a detected location, and `RecoveryDataVolumeGptId` ships empty on purpose. Run
+`--list-volumes` on your machine and fill it in before using RETIRE SYSTEM.
 
 ### Logs
 
@@ -233,6 +291,24 @@ dotnet build --configuration Release
 **RETIRE SYSTEM** is the separate Phase 2A handoff described in
 [Retiring Boot 1](#retiring-boot-1-phase-2a). It treats the currently running Windows as
 Boot 1 (the one to retire) and the detected target as Boot 2, and it deletes nothing.
+
+### Listing volumes
+
+```powershell
+.\CleanSwitch.exe --list-volumes
+```
+
+Prints one row per volume — disk number, partition number, GPT partition GUID, size,
+filesystem, current mount points, drive type, and whether it is the running system volume —
+then exits 0. It loads no configuration, writes no file, reads no BCD entry and changes no
+boot state; it only reads the partition table.
+
+Run it from an **elevated** PowerShell window so the output appears inline. Started from a
+non-elevated prompt, UAC gives the elevated process no console to inherit, so CleanSwitch
+allocates its own window and waits for Enter before closing it.
+
+This is how you get the value for `RecoveryDataVolumeGptId`. See
+[Where the retirement state lives, and why](#where-the-retirement-state-lives-and-why).
 
 ## GitHub SSH
 
@@ -281,6 +357,7 @@ Any failure in steps 2–5 shows an error and the PC is **not** restarted.
 Then, from a recovery environment command prompt (see the runtime caveat below):
 
 ```text
+X:\...\CleanSwitch.exe --list-volumes       read-only volume / GPT partition report, exits 0
 X:\...\CleanSwitch.exe --recovery-dry-run   validate + log only, no BCD change, no restart
 X:\...\CleanSwitch.exe --recovery-run       perform the Phase 2A handoff
 ```
@@ -338,14 +415,25 @@ stop safely after a power loss.
   "schemaVersion": 1,
   "phase": "2A",
   "destructiveDeletionPerformed": false,
+  "stateVolumeIdentity": {
+    "diskNumber": 0,
+    "partitionNumber": 5,
+    "volumeGuidPath": "\\\\?\\Volume{...}\\",
+    "gptPartitionId": "{...}",
+    "source": "Volume located by GPT partition GUID {...}"
+  },
   "transitions": [ { "from": "PENDING", "to": "PENDING", "atUtc": "...", "reason": "..." } ]
 }
 ```
 
+`stateVolumeIdentity` is optional metadata, so `schemaVersion` stays at 1 and state files
+written by earlier builds still load.
+
 ### Testing the handoff safely
 
-1. Point `RecoveryDataPath` at a folder on a non-Boot-1 volume and confirm the app starts
-   without a retirement error in the status line.
+1. Run `CleanSwitch.exe --list-volumes`, put the GPT partition GUID of a non-Boot-1 volume
+   into `RecoveryDataVolumeGptId`, and confirm the app starts without a retirement error in
+   the status line.
 2. Set `RecoveryGuid` from `bcdedit /enum all /v` and confirm the app accepts it.
 3. Run `CleanSwitch.exe --recovery-dry-run` **from the running Windows** first. It performs
    every validation and state transition, writes the log, and changes no boot state. Check
@@ -363,9 +451,12 @@ Note: `bcdedit /bootsequence` is a one-time setting. Clearing it, if needed, is
 
 - **Phase 2B** — actually retiring Boot 1 (partition removal). `RetirementExecutor` throws.
 - **Phase 2C** — removing the Boot 1 BCD entry and reclaiming the space.
-- Populating disk number, partition number and GPT partition id from the partition table.
-  `DiskValidator` compares them, but nothing fills them in yet.
 - Automatic invocation from WinRE. Phase 2A is started by hand with `--recovery-run`.
+- Verifying `stateVolumeIdentity` against the volume the state file was actually read from.
+  It is recorded, but nothing compares it yet.
+- Deriving Boot 1's partition identity from anything other than the drive letter in its BCD
+  `device` value. That letter is only meaningful in the environment that entry belongs to,
+  so `boot1Identity` is metadata a later phase must re-verify, never act on directly.
 
 ## Out of scope for this POC
 

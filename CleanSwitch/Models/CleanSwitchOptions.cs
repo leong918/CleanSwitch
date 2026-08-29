@@ -24,6 +24,27 @@ public sealed class CleanSwitchOptions
     /// </summary>
     public string RecoveryDataPath { get; set; } = string.Empty;
 
+    /// <summary>
+    /// GPT unique partition GUID of the volume that holds the retirement state file, e.g.
+    /// <c>{7c1e2f3a-...}</c>. Optional but strongly recommended: drive letters and Win32
+    /// volume GUIDs are assigned per Windows instance, so <c>D:</c> in Boot 1, in WinRE and
+    /// in Boot 2 are three different volumes. The GPT partition GUID lives in the partition
+    /// table on the disk, so it is identical in all three.
+    /// <para>
+    /// Find it with <c>CleanSwitch.exe --list-volumes</c>. When set, it wins over
+    /// <see cref="RecoveryDataPath"/> and a missing volume is a hard error rather than a
+    /// silent fallback to the letter path.
+    /// </para>
+    /// </summary>
+    public string RecoveryDataVolumeGptId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Folder name on the volume identified by <see cref="RecoveryDataVolumeGptId"/>. Must be
+    /// a plain name, not a rooted path. Defaults to the leaf of <see cref="RecoveryDataPath"/>
+    /// (so <c>D:\CleanSwitchData</c> yields <c>CleanSwitchData</c>).
+    /// </summary>
+    public string RecoveryDataFolderName { get; set; } = string.Empty;
+
     public string StateFileName { get; set; } = DefaultStateFileName;
 
     /// <summary>Optional override. Defaults to <c>{RecoveryDataPath}\logs</c>.</summary>
@@ -40,4 +61,33 @@ public sealed class CleanSwitchOptions
     /// stub that throws. Kept here so the authorisation shape is reviewable now.
     /// </summary>
     public bool EnableDestructiveRetirement { get; set; }
+
+    /// <summary>
+    /// Effective retirement data folder name: the explicit
+    /// <see cref="RecoveryDataFolderName"/>, otherwise the leaf of
+    /// <see cref="RecoveryDataPath"/>. Empty when neither yields one.
+    /// </summary>
+    public string ResolveRecoveryDataFolderName()
+    {
+        if (!string.IsNullOrWhiteSpace(RecoveryDataFolderName))
+        {
+            return RecoveryDataFolderName.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(RecoveryDataPath))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = RecoveryDataPath.Trim().TrimEnd('\\', '/');
+
+        try
+        {
+            return Path.GetFileName(trimmed);
+        }
+        catch (ArgumentException)
+        {
+            return string.Empty;
+        }
+    }
 }

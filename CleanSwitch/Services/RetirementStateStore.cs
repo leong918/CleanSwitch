@@ -23,13 +23,40 @@ public sealed class RetirementStorageException : Exception
 }
 
 /// <summary>
+/// Where the current configuration says the retirement state lives, resolved without
+/// creating or writing anything. <see cref="Error"/> is set instead of the paths when the
+/// configuration cannot be resolved at all.
+/// </summary>
+public sealed record RetirementLocationPreview(
+    string? Root,
+    string? StateFilePath,
+    string? Source,
+    PartitionIdentity? VolumeIdentity,
+    string? Error);
+
+/// <summary>
 /// Reads and writes the retirement state file.
 /// <para>
 /// Location rule: the state file must NOT live only on the volume that is going to be
 /// retired, otherwise the recovery-side run would lose its instructions the moment the
-/// deletion succeeded. The path is configured by <c>CleanSwitch:RecoveryDataPath</c> and
-/// is rejected outright when it resolves onto the running Windows volume, unless the
-/// operator opts in with <c>CleanSwitch:AllowStateOnSystemVolume</c> (test-only).
+/// deletion succeeded. The location is rejected outright when it resolves onto the running
+/// Windows volume, unless the operator opts in with
+/// <c>CleanSwitch:AllowStateOnSystemVolume</c> (test-only).
+/// </para>
+/// <para>
+/// Identity rule: a drive letter designates a different volume in each environment the
+/// retirement flow crosses (Boot 1, WinRE, Boot 2), and WinPE mints its own Win32 volume
+/// GUIDs, so neither is a usable anchor. When
+/// <c>CleanSwitch:RecoveryDataVolumeGptId</c> is set, the folder is resolved by GPT unique
+/// partition GUID — read from the partition table on the disk — and the current mount point
+/// is looked up at runtime. <c>CleanSwitch:RecoveryDataPath</c> keeps working as before when
+/// no GPT id is configured.
+/// </para>
+/// <para>
+/// Write side (Boot 1 creating the operation) resolves the configured location only. Read
+/// side (WinRE / Boot 2) additionally scans fixed volumes for a matching state file, because
+/// the configured letter may point somewhere else entirely in that environment. Ambiguity
+/// during a scan is a hard failure, never a guess.
 /// </para>
 /// </summary>
 public sealed class RetirementStateStore
@@ -45,22 +72,51 @@ public sealed class RetirementStateStore
     };
 
     private readonly IOperationLog _log;
+    private readonly string _stateFileName;
+    private readonly string _folderName;
+    private bool _scanned;
 
     public RetirementStateStore(CleanSwitchOptions options, IOperationLog? log = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         _log = log ?? NullOperationLog.Instance;
-        StateFilePath = ResolveStateFilePath(options);
+
+        var resolution = ResolveStateLocation(options);
+        ConfiguredStateFilePath = resolution.StateFilePath;
+        StateFilePath = resolution.StateFilePath;
+        StateVolumeIdentity = resolution.VolumeIdentity;
+        _stateFileName = resolution.StateFileName;
+        _folderName = resolution.FolderName;
+
+        _log.Info(
+            "state-store",
+            $"Retirement state location resolved by {resolution.Source}: '{resolution.StateFilePath}'" +
+            (resolution.VolumeIdentity is null
+                ? " (volume identity unavailable)"
+                : $" on {resolution.VolumeIdentity.Describe()}"));
     }
 
-    public string StateFilePath { get; }
+    /// <summary>
+    /// Where configuration says the state file is. <see cref="StateFilePath"/> can differ
+    /// from this after a successful read-side scan.
+    /// </summary>
+    public string ConfiguredStateFilePath { get; }
+
+    public string StateFilePath { get; private set; }
+
+    /// <summary>True when <see cref="StateFilePath"/> came from a volume scan, not configuration.</summary>
+    public bool StateFileFoundByScan { get; private set; }
+
+    /// <summary>Stable identity of the volume <see cref="StateFilePath"/> lives on, when it could be read.</summary>
+    public PartitionIdentity? StateVolumeIdentity { get; private set; }
 
     public string StateDirectory => Path.GetDirectoryName(StateFilePath) ?? StateFilePath;
 
     /// <summary>
     /// Resolves the log directory for a given configuration without needing a store
     /// instance, so logging can start before path validation runs (and can therefore
-    /// record why path validation failed).
+    /// record why path validation failed). Never throws: when the location cannot be
+    /// resolved, logging degrades to the %ProgramData% destination alone.
     /// </summary>
     public static string? ResolveLogDirectory(CleanSwitchOptions options)
     {
@@ -71,31 +127,56 @@ public sealed class RetirementStateStore
             return TryGetFullPath(options.LogDirectory);
         }
 
-        if (!string.IsNullOrWhiteSpace(options.RecoveryDataPath))
+        try
         {
-            var root = TryGetFullPath(options.RecoveryDataPath);
-            return root is null ? null : Path.Combine(root, "logs");
+            var root = ResolveRootDirectory(options).Root;
+            return Path.Combine(root, "logs");
         }
-
-        return null;
+        catch (RetirementStorageException)
+        {
+            return null;
+        }
     }
 
-    public static string ResolveStateFilePath(CleanSwitchOptions options)
+    /// <summary>
+    /// Kept for callers that only need the path. Applies the same resolution and the same
+    /// safety checks as the constructor.
+    /// </summary>
+    public static string ResolveStateFilePath(CleanSwitchOptions options) =>
+        ResolveStateLocation(options).StateFilePath;
+
+    /// <summary>
+    /// What the current configuration points at, with nothing created and nothing written.
+    /// For the <c>--list-volumes</c> diagnostic, so the operator can confirm a configured
+    /// GPT partition GUID resolves before starting a flow that reboots.
+    /// </summary>
+    public static RetirementLocationPreview PreviewLocation(CleanSwitchOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        if (string.IsNullOrWhiteSpace(options.RecoveryDataPath))
-        {
-            throw new RetirementStorageException(
-                "CleanSwitch:RecoveryDataPath is not set. The retirement state file must live on a volume " +
-                "that survives Boot 1 being retired, so CleanSwitch will not guess a location." +
-                Environment.NewLine +
-                "Set it in appsettings.json to a folder on a non-Boot-1 volume, for example \"D:\\\\CleanSwitchData\".");
-        }
+        var fileName = string.IsNullOrWhiteSpace(options.StateFileName)
+            ? CleanSwitchOptions.DefaultStateFileName
+            : options.StateFileName.Trim();
 
-        var root = TryGetFullPath(options.RecoveryDataPath)
-            ?? throw new RetirementStorageException(
-                $"CleanSwitch:RecoveryDataPath '{options.RecoveryDataPath}' is not a usable filesystem path.");
+        try
+        {
+            var resolved = ResolveRootDirectory(options);
+            return new RetirementLocationPreview(
+                resolved.Root,
+                Path.Combine(resolved.Root, fileName),
+                resolved.Source,
+                resolved.VolumeIdentity,
+                null);
+        }
+        catch (RetirementStorageException exception)
+        {
+            return new RetirementLocationPreview(null, null, null, null, exception.Message);
+        }
+    }
+
+    private static StateLocation ResolveStateLocation(CleanSwitchOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
 
         var fileName = string.IsNullOrWhiteSpace(options.StateFileName)
             ? CleanSwitchOptions.DefaultStateFileName
@@ -107,17 +188,20 @@ public sealed class RetirementStateStore
                 $"CleanSwitch:StateFileName '{fileName}' contains characters that are not valid in a file name.");
         }
 
+        var resolvedRoot = ResolveRootDirectory(options);
+        var root = resolvedRoot.Root;
         var stateFilePath = Path.Combine(root, fileName);
 
         var mountPoint = VolumeIdentity.TryGetVolumeMountPoint(root);
         if (mountPoint is null || !Directory.Exists(mountPoint))
         {
             throw new RetirementStorageException(
-                $"The volume hosting CleanSwitch:RecoveryDataPath ('{root}') is not available." +
+                $"The volume hosting the retirement data folder ('{root}', resolved by {resolvedRoot.Source}) " +
+                "is not available." +
                 Environment.NewLine +
-                "Attach or mount that volume, or point CleanSwitch:RecoveryDataPath at a folder on a volume " +
-                "that is present both in Boot 1 and in the recovery environment. CleanSwitch will not fall back " +
-                "to a Boot 1 only path, because that copy would disappear together with Boot 1.");
+                "Attach or mount that volume, or point the retirement data folder at a volume that is present " +
+                "both in Boot 1 and in the recovery environment. CleanSwitch will not fall back to a Boot 1 " +
+                "only path, because that copy would disappear together with Boot 1.");
         }
 
         var configuredVolume = VolumeIdentity.TryGetVolumeGuidPath(root);
@@ -134,14 +218,17 @@ public sealed class RetirementStateStore
         if (onSystemVolume && !options.AllowStateOnSystemVolume)
         {
             throw new RetirementStorageException(
-                $"CleanSwitch:RecoveryDataPath ('{root}') resolves to the running Windows volume " +
-                $"({systemVolume ?? systemMountPoint ?? "unknown"}), which is the volume being retired." +
+                $"The retirement data folder ('{root}', resolved by {resolvedRoot.Source}) resolves to the " +
+                $"running Windows volume ({systemVolume ?? systemMountPoint ?? "unknown"}), which is the volume " +
+                "being retired." +
                 Environment.NewLine +
                 "The only copy of the retirement state would be destroyed by the operation it is supposed " +
                 "to be driving." +
                 Environment.NewLine +
-                "Fix this by pointing CleanSwitch:RecoveryDataPath at a folder on a different volume " +
-                "(a second internal disk, a data partition, or a USB stick that is also visible from WinRE)." +
+                "Fix this by pointing CleanSwitch:RecoveryDataVolumeGptId (preferred) or " +
+                "CleanSwitch:RecoveryDataPath at a different volume: a second internal disk, a data " +
+                "partition, or a USB stick that is also visible from WinRE. Run " +
+                "'CleanSwitch.exe --list-volumes' to see the GPT partition GUIDs to choose from." +
                 Environment.NewLine +
                 "For non-destructive Phase 2A handoff testing only, set CleanSwitch:AllowStateOnSystemVolume " +
                 "to true to accept this unsafe location.");
@@ -156,13 +243,185 @@ public sealed class RetirementStateStore
             throw new RetirementStorageException(
                 $"CleanSwitch could not create the retirement data folder '{root}': {exception.Message}" +
                 Environment.NewLine +
-                "Create the folder manually, grant Administrators write access to it, or choose another " +
-                "CleanSwitch:RecoveryDataPath.",
+                "Create the folder manually, grant Administrators write access to it, or point " +
+                "CleanSwitch:RecoveryDataVolumeGptId / CleanSwitch:RecoveryDataPath at another volume.",
                 exception);
         }
 
-        return stateFilePath;
+        return new StateLocation(
+            stateFilePath,
+            fileName,
+            resolvedRoot.FolderName,
+            resolvedRoot.Source,
+            resolvedRoot.VolumeIdentity ?? TryDescribeVolumeForPath(root, "Volume hosting the retirement data folder"));
     }
+
+    /// <summary>
+    /// Turns configuration into the retirement data folder.
+    /// <para>
+    /// Order: (1) <c>CleanSwitch:RecoveryDataVolumeGptId</c>, resolved through the partition
+    /// table to whatever mount point that volume currently has; (2) the literal
+    /// <c>CleanSwitch:RecoveryDataPath</c>. A configured GPT id that cannot be found is a
+    /// hard failure. Falling back to the letter path there would be actively dangerous: the
+    /// same letter designates a different volume in each environment, so the fallback could
+    /// write the state file onto the volume slated for deletion.
+    /// </para>
+    /// </summary>
+    private static ResolvedRoot ResolveRootDirectory(CleanSwitchOptions options)
+    {
+        var folderName = options.ResolveRecoveryDataFolderName();
+
+        if (!string.IsNullOrWhiteSpace(options.RecoveryDataVolumeGptId))
+        {
+            return ResolveRootByGptId(options, folderName);
+        }
+
+        if (string.IsNullOrWhiteSpace(options.RecoveryDataPath))
+        {
+            throw new RetirementStorageException(
+                "Neither CleanSwitch:RecoveryDataVolumeGptId nor CleanSwitch:RecoveryDataPath is set. The " +
+                "retirement state file must live on a volume that survives Boot 1 being retired, so CleanSwitch " +
+                "will not guess a location." +
+                Environment.NewLine +
+                "Preferred: run 'CleanSwitch.exe --list-volumes', copy the GPT partition GUID of the volume that " +
+                "should hold the state file into CleanSwitch:RecoveryDataVolumeGptId, and set " +
+                "CleanSwitch:RecoveryDataFolderName (for example \"CleanSwitchData\")." +
+                Environment.NewLine +
+                "Or set CleanSwitch:RecoveryDataPath to a folder on a non-Boot-1 volume, for example " +
+                "\"D:\\\\CleanSwitchData\". Note that a drive letter means a different volume in Boot 1, in " +
+                "WinRE and in Boot 2.");
+        }
+
+        var root = TryGetFullPath(options.RecoveryDataPath)
+            ?? throw new RetirementStorageException(
+                $"CleanSwitch:RecoveryDataPath '{options.RecoveryDataPath}' is not a usable filesystem path.");
+
+        return new ResolvedRoot(root, folderName, "CleanSwitch:RecoveryDataPath (literal drive letter path)", null);
+    }
+
+    private static ResolvedRoot ResolveRootByGptId(CleanSwitchOptions options, string folderName)
+    {
+        var configured = options.RecoveryDataVolumeGptId.Trim();
+
+        if (!VolumeLocator.TryParseGptId(configured, out var gptPartitionId))
+        {
+            throw new RetirementStorageException(
+                $"CleanSwitch:RecoveryDataVolumeGptId '{configured}' is not a GUID. Expected a value like " +
+                "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}, which you can read off " +
+                "'CleanSwitch.exe --list-volumes'.");
+        }
+
+        if (string.IsNullOrWhiteSpace(folderName))
+        {
+            throw new RetirementStorageException(
+                "CleanSwitch:RecoveryDataVolumeGptId is set but no folder name could be determined." +
+                Environment.NewLine +
+                "Set CleanSwitch:RecoveryDataFolderName (for example \"CleanSwitchData\"), or leave " +
+                "CleanSwitch:RecoveryDataPath populated so its last path segment can be used.");
+        }
+
+        if (folderName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || Path.IsPathRooted(folderName))
+        {
+            throw new RetirementStorageException(
+                $"CleanSwitch:RecoveryDataFolderName '{folderName}' must be a plain folder name, not a rooted " +
+                "path, because it is combined with whatever mount point the identified volume currently has.");
+        }
+
+        var located = VolumeLocator.Enumerate();
+        var matches = located.WithGptPartitionId(gptPartitionId);
+
+        if (matches.Count == 0)
+        {
+            throw new RetirementStorageException(
+                $"No volume on this machine has GPT partition GUID {VolumeLocator.FormatGptId(gptPartitionId)}, " +
+                "which CleanSwitch:RecoveryDataVolumeGptId names as the home of the retirement state file." +
+                Environment.NewLine +
+                "CleanSwitch will NOT fall back to CleanSwitch:RecoveryDataPath, because that is a drive letter " +
+                "and a drive letter designates a different volume in every environment - including, possibly, " +
+                "the volume this operation is meant to retire." +
+                Environment.NewLine +
+                "Volumes seen right now:" +
+                Environment.NewLine +
+                DescribeVolumes(located) +
+                Environment.NewLine +
+                "Run 'CleanSwitch.exe --list-volumes' and correct CleanSwitch:RecoveryDataVolumeGptId.");
+        }
+
+        if (matches.Count > 1)
+        {
+            throw new RetirementStorageException(
+                $"{matches.Count} volumes report GPT partition GUID " +
+                $"{VolumeLocator.FormatGptId(gptPartitionId)}, which cannot be true of a healthy partition " +
+                "table. Refusing to choose one." +
+                Environment.NewLine +
+                string.Join(Environment.NewLine, matches.Select(volume => "  " + volume.Describe())));
+        }
+
+        var match = matches[0];
+        var mountPoint = match.PrimaryMountPoint;
+
+        if (string.IsNullOrWhiteSpace(mountPoint))
+        {
+            throw new RetirementStorageException(
+                $"The volume with GPT partition GUID {VolumeLocator.FormatGptId(gptPartitionId)} " +
+                $"(disk {match.DiskNumber?.ToString() ?? "?"} partition " +
+                $"{match.PartitionNumber?.ToString() ?? "?"}, {LocatedVolume.FormatSize(match.SizeBytes)}) has no " +
+                "mount point in this environment, so CleanSwitch cannot build a path to it." +
+                Environment.NewLine +
+                "Assign it a drive letter in this environment (for example with diskpart 'assign letter=') and " +
+                "run CleanSwitch again. CleanSwitch never mounts or unmounts volumes itself.");
+        }
+
+        var root = Path.Combine(mountPoint, folderName);
+
+        return new ResolvedRoot(
+            root,
+            folderName,
+            $"CleanSwitch:RecoveryDataVolumeGptId {VolumeLocator.FormatGptId(gptPartitionId)} " +
+            $"-> current mount point '{mountPoint}'",
+            match.ToPartitionIdentity(
+                $"Volume located by GPT partition GUID {VolumeLocator.FormatGptId(gptPartitionId)}"));
+    }
+
+    private static string DescribeVolumes(VolumeLocatorResult located)
+    {
+        var lines = located.Volumes.Select(volume => "  " + volume.Describe()).ToList();
+        lines.AddRange(located.Warnings.Select(warning => "  ! " + warning));
+        return lines.Count == 0 ? "  (none)" : string.Join(Environment.NewLine, lines);
+    }
+
+    private static PartitionIdentity? TryDescribeVolumeForPath(string path, string source)
+    {
+        var volumeGuidPath = VolumeIdentity.TryGetVolumeGuidPath(path);
+        if (volumeGuidPath is null)
+        {
+            return null;
+        }
+
+        var match = VolumeLocator.Enumerate().Volumes
+            .FirstOrDefault(volume => VolumeIdentity.AreSameVolume(volume.VolumeGuidPath, volumeGuidPath));
+
+        return match?.ToPartitionIdentity(source)
+            ?? new PartitionIdentity
+            {
+                VolumeGuidPath = volumeGuidPath,
+                ObservedDriveLetter = VolumeIdentity.TryGetVolumeMountPoint(path),
+                Source = source + " (partition table lookup unavailable)"
+            };
+    }
+
+    private sealed record ResolvedRoot(
+        string Root,
+        string FolderName,
+        string Source,
+        PartitionIdentity? VolumeIdentity);
+
+    private sealed record StateLocation(
+        string StateFilePath,
+        string StateFileName,
+        string FolderName,
+        string Source,
+        PartitionIdentity? VolumeIdentity);
 
     /// <summary>
     /// Confirms the configured location is actually writable right now. Called before the
@@ -183,53 +442,76 @@ public sealed class RetirementStateStore
                 $"CleanSwitch cannot write to the retirement data folder '{StateDirectory}': {exception.Message}" +
                 Environment.NewLine +
                 "The retirement flow will not start, because the state file is the only record that survives " +
-                "the reboot into recovery. Grant write access or choose another CleanSwitch:RecoveryDataPath.",
+                "the reboot into recovery. Grant write access, or point " +
+                "CleanSwitch:RecoveryDataVolumeGptId / CleanSwitch:RecoveryDataPath at another volume.",
                 exception);
         }
     }
 
     public bool Exists() => File.Exists(StateFilePath);
 
+    /// <summary>
+    /// Loads the state file. When nothing is at the configured location, falls back to
+    /// scanning every fixed volume for <c>&lt;volume&gt;\&lt;folder&gt;\&lt;state file&gt;</c>,
+    /// because in WinRE and on Boot 2 the configured drive letter points at a different
+    /// volume than it did on Boot 1. A scan that finds more than one distinct valid state
+    /// file fails loudly instead of choosing.
+    /// </summary>
     public RetirementState? TryLoad()
     {
         if (!File.Exists(StateFilePath))
         {
             _log.Info("state-store", $"No retirement state file at '{StateFilePath}'.");
-            return null;
+
+            var scanned = TryAdoptScannedStateFile();
+            if (scanned is null)
+            {
+                return null;
+            }
+
+            return Validate(scanned.State, scanned.Path);
         }
 
+        var state = ReadAndParse(StateFilePath);
+        return Validate(state, StateFilePath);
+    }
+
+    private RetirementState ReadAndParse(string path)
+    {
         string json;
         try
         {
-            json = File.ReadAllText(StateFilePath, Encoding.UTF8);
+            json = File.ReadAllText(path, Encoding.UTF8);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             throw new RetirementStorageException(
-                $"CleanSwitch could not read the retirement state file '{StateFilePath}': {exception.Message}",
+                $"CleanSwitch could not read the retirement state file '{path}': {exception.Message}",
                 exception);
         }
 
-        RetirementState state;
         try
         {
-            state = JsonSerializer.Deserialize<RetirementState>(json, JsonOptions)
+            return JsonSerializer.Deserialize<RetirementState>(json, JsonOptions)
                 ?? throw new RetirementStorageException(
-                    $"The retirement state file '{StateFilePath}' is empty or not a JSON object.");
+                    $"The retirement state file '{path}' is empty or not a JSON object.");
         }
         catch (JsonException exception)
         {
             throw new RetirementStorageException(
-                $"The retirement state file '{StateFilePath}' is not valid JSON: {exception.Message}" +
+                $"The retirement state file '{path}' is not valid JSON: {exception.Message}" +
                 Environment.NewLine +
                 "Inspect it by hand. Do not delete it while a retirement is in progress.",
                 exception);
         }
+    }
 
+    private RetirementState Validate(RetirementState state, string path)
+    {
         if (state.SchemaVersion != RetirementState.CurrentSchemaVersion)
         {
             throw new RetirementStorageException(
-                $"The retirement state file '{StateFilePath}' has schemaVersion {state.SchemaVersion}, " +
+                $"The retirement state file '{path}' has schemaVersion {state.SchemaVersion}, " +
                 $"but this build understands version {RetirementState.CurrentSchemaVersion}. " +
                 "Refusing to act on a state file it may misinterpret.");
         }
@@ -237,17 +519,163 @@ public sealed class RetirementStateStore
         if (!string.Equals(state.Operation, RetirementState.RetireBoot1Operation, StringComparison.Ordinal))
         {
             throw new RetirementStorageException(
-                $"The retirement state file '{StateFilePath}' describes operation '{state.Operation}', " +
+                $"The retirement state file '{path}' describes operation '{state.Operation}', " +
                 $"but only '{RetirementState.RetireBoot1Operation}' is supported.");
         }
 
         _log.Info(
             "state-store",
-            $"Loaded retirement state from '{StateFilePath}': status={RetirementStatusNames.ToWire(state.Status)}, " +
+            $"Loaded retirement state from '{path}': status={RetirementStatusNames.ToWire(state.Status)}, " +
             $"boot1={state.Boot1Id}, boot2={state.Boot2Id}, transitions={state.Transitions.Count}.");
 
         return state;
     }
+
+    /// <summary>
+    /// Scans every fixed volume for a valid state file and, if exactly one distinct volume
+    /// holds one, redirects this store at it so later transitions are saved back to the same
+    /// file. Runs at most once per store instance.
+    /// </summary>
+    private ScannedStateFile? TryAdoptScannedStateFile()
+    {
+        if (_scanned)
+        {
+            return null;
+        }
+
+        _scanned = true;
+
+        if (string.IsNullOrWhiteSpace(_folderName))
+        {
+            _log.Info(
+                "state-store",
+                "No retirement data folder name is configured, so there is nothing to scan volumes for.");
+            return null;
+        }
+
+        var located = VolumeLocator.Enumerate();
+        foreach (var warning in located.Warnings)
+        {
+            _log.Warn("state-store", $"Volume scan warning: {warning}");
+        }
+
+        var candidates = new List<ScannedStateFile>();
+        var skippedRemovable = 0;
+
+        foreach (var volume in located.Volumes)
+        {
+            if (!volume.IsFixed)
+            {
+                skippedRemovable++;
+                continue;
+            }
+
+            foreach (var mountPoint in volume.MountPoints)
+            {
+                var candidatePath = Path.Combine(mountPoint, _folderName, _stateFileName);
+                if (!File.Exists(candidatePath))
+                {
+                    continue;
+                }
+
+                RetirementState parsed;
+                try
+                {
+                    parsed = ReadAndParse(candidatePath);
+                }
+                catch (RetirementStorageException exception)
+                {
+                    _log.Warn(
+                        "state-store",
+                        $"Volume scan ignored '{candidatePath}': {exception.Message}");
+                    continue;
+                }
+
+                if (parsed.SchemaVersion != RetirementState.CurrentSchemaVersion ||
+                    !string.Equals(parsed.Operation, RetirementState.RetireBoot1Operation, StringComparison.Ordinal))
+                {
+                    _log.Warn(
+                        "state-store",
+                        $"Volume scan ignored '{candidatePath}': operation='{parsed.Operation}' " +
+                        $"schemaVersion={parsed.SchemaVersion}; expected " +
+                        $"'{RetirementState.RetireBoot1Operation}' and " +
+                        $"{RetirementState.CurrentSchemaVersion}.");
+                    continue;
+                }
+
+                // One volume can be reachable through several mount points; that is the same
+                // file, not an ambiguity.
+                if (candidates.Any(existing =>
+                        VolumeIdentity.AreSameVolume(existing.Volume.VolumeGuidPath, volume.VolumeGuidPath)))
+                {
+                    continue;
+                }
+
+                candidates.Add(new ScannedStateFile(candidatePath, parsed, volume));
+                break;
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            _log.Info(
+                "state-store",
+                $"Volume scan found no '{_folderName}\\{_stateFileName}' on any of the " +
+                $"{located.Volumes.Count(volume => volume.IsFixed)} fixed volume(s)" +
+                (skippedRemovable == 0
+                    ? "."
+                    : $" ({skippedRemovable} removable/other volume(s) were not scanned)."));
+            return null;
+        }
+
+        if (candidates.Count > 1)
+        {
+            var ambiguity =
+                $"{candidates.Count} different volumes hold a valid '{RetirementState.RetireBoot1Operation}' " +
+                "state file, so CleanSwitch cannot tell which operation it is supposed to be driving." +
+                Environment.NewLine +
+                string.Join(
+                    Environment.NewLine,
+                    candidates.Select(candidate =>
+                        $"  {candidate.Path} - status=" +
+                        $"{RetirementStatusNames.ToWire(candidate.State.Status)} " +
+                        $"created={candidate.State.CreatedAtUtc:u} on {candidate.Volume.Describe()}")) +
+                Environment.NewLine +
+                "Ambiguity must stop the flow rather than pick one. Delete the stale file(s), or set " +
+                "CleanSwitch:RecoveryDataVolumeGptId to the GPT partition GUID of the volume that holds the " +
+                "real one (see 'CleanSwitch.exe --list-volumes'), then run again.";
+
+            // Logged here as well as thrown, because some callers only surface a short message.
+            _log.Warn("state-store", ambiguity);
+            throw new RetirementStorageException(ambiguity);
+        }
+
+        var found = candidates[0];
+
+        _log.Warn(
+            "state-store",
+            "RETIREMENT STATE FILE FOUND BY VOLUME SCAN, NOT BY CONFIGURATION." +
+            Environment.NewLine +
+            $"  Configured location : {ConfiguredStateFilePath} (nothing there)" +
+            Environment.NewLine +
+            $"  Found instead       : {found.Path}" +
+            Environment.NewLine +
+            $"  On volume           : {found.Volume.Describe()}" +
+            Environment.NewLine +
+            "  Drive letters differ per Windows instance, which is the expected reason the configured path " +
+            "missed. Set CleanSwitch:RecoveryDataVolumeGptId to " +
+            $"{found.Volume.GptPartitionId ?? "the GPT partition GUID of that volume"} to make this " +
+            "deterministic.");
+
+        StateFilePath = found.Path;
+        StateFileFoundByScan = true;
+        StateVolumeIdentity = found.Volume.ToPartitionIdentity(
+            "Volume holding the retirement state file, found by fixed-volume scan");
+
+        return found;
+    }
+
+    private sealed record ScannedStateFile(string Path, RetirementState State, LocatedVolume Volume);
 
     /// <summary>
     /// Writes the state file atomically: serialise to a temp file in the same directory,

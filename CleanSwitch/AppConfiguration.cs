@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CleanSwitch.Models;
+using CleanSwitch.Recovery;
 
 namespace CleanSwitch;
 
@@ -39,10 +40,28 @@ internal static class AppConfiguration
                 "CleanSwitch read the running entry's recoverysequence.");
         }
 
+        if (!string.IsNullOrWhiteSpace(options.RecoveryDataVolumeGptId))
+        {
+            if (!VolumeLocator.TryParseGptId(options.RecoveryDataVolumeGptId, out var gptPartitionId))
+            {
+                throw new InvalidOperationException(
+                    $"CleanSwitch:RecoveryDataVolumeGptId '{options.RecoveryDataVolumeGptId}' is not a GUID. " +
+                    "Expected a value like {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}. " +
+                    "Get the GPT unique partition GUID of the volume that should hold the retirement state " +
+                    "file by running 'CleanSwitch.exe --list-volumes', or leave the setting empty to fall " +
+                    "back to the literal CleanSwitch:RecoveryDataPath.");
+            }
+
+            options.RecoveryDataVolumeGptId = VolumeLocator.FormatGptId(gptPartitionId);
+        }
+
         if (string.IsNullOrWhiteSpace(options.StateFileName))
         {
             options.StateFileName = CleanSwitchOptions.DefaultStateFileName;
         }
+
+        // Make the effective value explicit so it appears verbatim in logs and errors.
+        options.RecoveryDataFolderName = options.ResolveRecoveryDataFolderName();
 
         return options;
     }

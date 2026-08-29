@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
 using CleanSwitch.Recovery;
 using CleanSwitch.Services;
 
@@ -8,12 +10,18 @@ internal static class Program
 {
     private const string RecoveryRunSwitch = "--recovery-run";
     private const string RecoveryDryRunSwitch = "--recovery-dry-run";
+    private const string ListVolumesSwitch = "--list-volumes";
 
     [STAThread]
     static int Main(string[] args)
     {
         var recoveryRun = HasSwitch(args, RecoveryRunSwitch);
         var recoveryDryRun = HasSwitch(args, RecoveryDryRunSwitch);
+
+        if (HasSwitch(args, ListVolumesSwitch))
+        {
+            return ListVolumes();
+        }
 
         if (recoveryRun || recoveryDryRun)
         {
@@ -32,7 +40,7 @@ internal static class Program
     /// </summary>
     private static int RunRecoverySide(bool dryRun)
     {
-        AttachConsole(AttachParentProcess);
+        ConsoleHost.Attach();
 
         try
         {
@@ -58,6 +66,189 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// <c>CleanSwitch.exe --list-volumes</c>: read-only inventory of every volume with the
+    /// disk, partition and GPT partition GUID behind it.
+    /// <para>
+    /// This is how the operator discovers the value for
+    /// <c>CleanSwitch:RecoveryDataVolumeGptId</c>. It reads the partition table and nothing
+    /// else: no configuration is loaded, no state file is written, no BCD entry is read or
+    /// changed, and the PC is never restarted.
+    /// </para>
+    /// </summary>
+    private static int ListVolumes()
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+
+        Report("CleanSwitch volume report (read-only). No boot entry, partition or file was changed.");
+        Report(string.Empty);
+
+        var located = VolumeLocator.Enumerate();
+
+        if (located.Volumes.Count == 0)
+        {
+            Report("No volumes could be enumerated.");
+        }
+        else
+        {
+            WriteVolumeTable(located);
+        }
+
+        if (located.Warnings.Count > 0)
+        {
+            Report(string.Empty);
+            Report("Enumeration warnings:");
+            foreach (var warning in located.Warnings)
+            {
+                Report("  ! " + warning);
+            }
+        }
+
+        var unidentified = located.Volumes
+            .Where(volume => volume.Outcome != VolumeIdentityOutcome.Identified)
+            .ToList();
+
+        if (unidentified.Count > 0)
+        {
+            Report(string.Empty);
+            Report("Volumes without a GPT partition identity:");
+            foreach (var volume in unidentified)
+            {
+                Report($"  {volume.VolumeGuidPath}");
+                Report($"    {volume.Outcome}: {volume.Diagnostic}");
+            }
+        }
+
+        Report(string.Empty);
+        ReportConfiguredLocation();
+
+        Report(string.Empty);
+        Report("Partitions with no volume device - Microsoft Reserved, unformatted, or unrecognised - have no");
+        Report("row here by design: this lists volumes, not every partition table entry. CD/DVD and network");
+        Report("volumes are skipped. Sizes are decimal GB/MB, taken from the partition table where available.");
+        Report(string.Empty);
+        Report("The GPT partition GUID is read from the partition table on the disk, so it is the same value");
+        Report("from Boot 1, from WinRE and from Boot 2. Drive letters and \\\\?\\Volume{...} GUIDs are not:");
+        Report("both are assigned per Windows instance, and WinPE mints its own volume GUIDs.");
+        Report(string.Empty);
+        Report("Copy the GPT partition GUID of the volume that should hold the retirement state file into");
+        Report("CleanSwitch:RecoveryDataVolumeGptId in appsettings.json, and set");
+        Report("CleanSwitch:RecoveryDataFolderName to the folder name on that volume (default CleanSwitchData).");
+
+        if (ownsConsole)
+        {
+            Report(string.Empty);
+            Report("Press Enter to close this window...");
+            Console.In.ReadLine();
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Shows what the current configuration resolves to, without creating the folder or
+    /// writing anything. Never fails the command: a broken configuration is something this
+    /// diagnostic should report, not something it should die on.
+    /// </summary>
+    private static void ReportConfiguredLocation()
+    {
+        Report("Configured retirement data location:");
+
+        Models.CleanSwitchOptions options;
+        try
+        {
+            options = AppConfiguration.Load();
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or JsonException)
+        {
+            Report($"  appsettings.json could not be read: {exception.Message}");
+            return;
+        }
+
+        Report($"  RecoveryDataVolumeGptId : {Or(options.RecoveryDataVolumeGptId, "(not set)")}");
+        Report($"  RecoveryDataFolderName  : {Or(options.RecoveryDataFolderName, "(not set)")}");
+        Report($"  RecoveryDataPath        : {Or(options.RecoveryDataPath, "(not set)")}");
+
+        var preview = RetirementStateStore.PreviewLocation(options);
+
+        if (preview.Error is not null)
+        {
+            Report("  Resolves to             : NOTHING - the retirement flow would refuse to start.");
+            foreach (var line in preview.Error.Split(Environment.NewLine))
+            {
+                Report("    " + line);
+            }
+
+            return;
+        }
+
+        Report($"  Resolved by             : {preview.Source}");
+        Report($"  Resolves to             : {preview.Root}");
+        Report(
+            $"  State file would be     : {preview.StateFilePath} " +
+            (File.Exists(preview.StateFilePath!) ? "(exists)" : "(does not exist yet)"));
+
+        if (preview.VolumeIdentity is not null)
+        {
+            Report($"  On volume               : {preview.VolumeIdentity.Describe()}");
+        }
+    }
+
+    private static string Or(string? value, string fallback) =>
+        string.IsNullOrWhiteSpace(value) ? fallback : value;
+
+    private static void WriteVolumeTable(VolumeLocatorResult located)
+    {
+        var rows = located.Volumes
+            .OrderBy(volume => volume.DiskNumber ?? int.MaxValue)
+            .ThenBy(volume => volume.PartitionNumber ?? int.MaxValue)
+            .Select(volume => new[]
+            {
+                volume.DiskNumber?.ToString() ?? "?",
+                volume.PartitionNumber?.ToString() ?? "?",
+                volume.GptPartitionId ?? "(none)",
+                LocatedVolume.FormatSize(volume.SizeBytes),
+                volume.FileSystem ?? "(none)",
+                volume.MountPoints.Count == 0 ? "(none)" : string.Join(" ", volume.MountPoints),
+                volume.DriveType.ToString(),
+                volume.IsRunningSystemVolume ? "YES" : "no"
+            })
+            .ToList();
+
+        string[] headers = ["Disk", "Part", "GPT partition GUID", "Size", "FS", "Mounts", "Drive type", "Running OS"];
+
+        var widths = headers
+            .Select((header, column) => rows
+                .Select(row => row[column].Length)
+                .Append(header.Length)
+                .Max())
+            .ToArray();
+
+        Report(FormatRow(headers, widths));
+        Report(FormatRow(widths.Select(width => new string('-', width)).ToArray(), widths));
+
+        foreach (var row in rows)
+        {
+            Report(FormatRow(row, widths));
+        }
+    }
+
+    private static string FormatRow(IReadOnlyList<string> cells, IReadOnlyList<int> widths)
+    {
+        var builder = new StringBuilder();
+        for (var column = 0; column < cells.Count; column++)
+        {
+            if (column > 0)
+            {
+                builder.Append("  ");
+            }
+
+            builder.Append(cells[column].PadRight(widths[column]));
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
     private static bool HasSwitch(IEnumerable<string> args, string name) =>
         args.Any(argument => string.Equals(argument?.Trim(), name, StringComparison.OrdinalIgnoreCase));
 
@@ -66,14 +257,82 @@ internal static class Program
         Console.Out.WriteLine(message);
         Console.Out.Flush();
     }
+}
 
+/// <summary>
+/// Gives this <c>WinExe</c> a usable console for its command-line modes. A WinForms app has
+/// no console of its own, so without this every <c>Console.Write</c> goes nowhere.
+/// </summary>
+internal static class ConsoleHost
+{
     private const int AttachParentProcess = -1;
+    private const int ErrorAccessDenied = 5;
+
+    private static bool _attached;
 
     /// <summary>
-    /// Lets the WinExe write to the console it was launched from. Failure is ignored: the
-    /// file log is the authoritative record.
+    /// Attaches to the console this process was launched from. Failure is ignored: the file
+    /// log is the authoritative record for the unattended recovery modes.
     /// </summary>
+    /// <param name="allocateIfMissing">
+    /// When true and there is no parent console, allocate one. That is the case when an
+    /// elevated <c>requireAdministrator</c> process is started from a non-elevated prompt,
+    /// because UAC hands it no console. Only interactive modes should ask for this: the
+    /// allocated window disappears the moment the process exits.
+    /// </param>
+    /// <returns>True when a console was allocated, so an interactive mode should pause before exiting.</returns>
+    public static bool Attach(bool allocateIfMissing = false)
+    {
+        if (_attached)
+        {
+            return false;
+        }
+
+        _attached = true;
+
+        var ownsConsole = false;
+
+        if (!AttachConsole(AttachParentProcess))
+        {
+            // ERROR_ACCESS_DENIED means this process already has a console, which is fine.
+            var error = Marshal.GetLastWin32Error();
+            if (allocateIfMissing && error != ErrorAccessDenied)
+            {
+                ownsConsole = AllocConsole();
+            }
+        }
+
+        RedirectStandardStreams();
+        return ownsConsole;
+    }
+
+    /// <summary>
+    /// Console.Out may already have been bound to the null stream before the console existed,
+    /// so rebind it to the real handles.
+    /// </summary>
+    private static void RedirectStandardStreams()
+    {
+        try
+        {
+            var output = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
+            Console.SetOut(output);
+
+            var error = new StreamWriter(Console.OpenStandardError()) { AutoFlush = true };
+            Console.SetError(error);
+
+            Console.SetIn(new StreamReader(Console.OpenStandardInput()));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // No console is available. The file log is the authoritative record.
+        }
+    }
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AttachConsole(int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AllocConsole();
 }

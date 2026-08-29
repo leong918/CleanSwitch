@@ -150,7 +150,17 @@ public sealed class RetirementState
     [JsonPropertyOrder(12)]
     public PartitionIdentity? Boot1Identity { get; set; }
 
+    /// <summary>
+    /// Stable identity of the volume this state file itself lives on, recorded when the
+    /// operation was created on Boot 1. A later phase running in WinRE or on Boot 2 can
+    /// compare it against the volume it actually read the file from, which is the only way
+    /// to be sure the two are the same volume: drive letters and Win32 volume GUIDs are
+    /// both reassigned per Windows instance.
+    /// </summary>
     [JsonPropertyOrder(13)]
+    public PartitionIdentity? StateVolumeIdentity { get; set; }
+
+    [JsonPropertyOrder(14)]
     public List<RetirementTransition> Transitions { get; set; } = [];
 
     public bool IsTerminal =>

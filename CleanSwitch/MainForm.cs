@@ -274,7 +274,7 @@ public partial class MainForm : Form
                 or RetirementStateException)
         {
             statusLabel.Text =
-                "Ready. Retirement is unavailable until CleanSwitch:RecoveryDataPath is configured.";
+                "Ready. The retirement state could not be read; see the CleanSwitch log for the reason.";
         }
     }
 
