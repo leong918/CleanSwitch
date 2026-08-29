@@ -13,7 +13,8 @@ no network control.
 
 There is a second action, **RETIRE SYSTEM**, which prepares the Boot 1 → Recovery →
 Boot 2 handoff. As of Phase 2A it still deletes nothing. See
-[Retiring Boot 1](#retiring-boot-1-phase-2a) and `FUTURE.md`.
+[Retiring Boot 1](#retiring-boot-1-phase-2a), `FUTURE.md`, and the remaining
+work list in `docs/TASKS-LEFT.md`.
 
 ## Safety
 

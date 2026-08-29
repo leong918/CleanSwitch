@@ -3,9 +3,11 @@
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Detect both Windows entries, one-time switch, restart | Implemented |
-| 2A | Boot 1 → Recovery → Boot 2 handoff, state machine, logging, validators. **No deletion.** | Implemented |
+| 2A | Boot 1 → Recovery → Boot 2 handoff, state machine, logging, validators. **No deletion.** | Implemented in code; **not yet tested on this PC** |
 | 2B | Actually retire Boot 1: identify the partition from stable identifiers and remove it | **Not implemented** |
 | 2C | Remove the Boot 1 BCD entry, reclaim space, verify from Boot 2 | **Not implemented** |
+
+The remaining work list, in order, is `docs/TASKS-LEFT.md`.
 
 Deletion of anything — partition, volume, or BCD object — is **not implemented** in any
 form. `Recovery/RetirementExecutor.cs` contains no deletion code; every entry point throws
