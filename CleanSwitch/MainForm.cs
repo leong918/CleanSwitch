@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CleanSwitch.Models;
+using CleanSwitch.Recovery;
 using CleanSwitch.Services;
 
 namespace CleanSwitch;
@@ -192,23 +193,21 @@ public partial class MainForm : Form
 
             var boot1Identity = await services.BootEntryValidator.TryDescribeBootEntryVolumeAsync(boot1.Identifier);
             var boot2Identity = await services.BootEntryValidator.TryDescribeBootEntryVolumeAsync(boot2.Identifier);
-            if (boot1Identity is null || !boot1Identity.HasStableIdentifiers)
+            if (boot1Identity is null || boot2Identity is null)
             {
                 ShowRetireError(
-                    "Boot 1 partition identity could not be recorded from the partition table, so nothing was " +
+                    "Boot 1 or Boot 2 partition identity could not be recorded from the partition table, so nothing was " +
                     "changed and the PC will not restart." + Environment.NewLine + Environment.NewLine +
-                    (boot1Identity?.Describe() ?? "No identity returned."));
+                    $"Boot 1: {boot1Identity?.Describe() ?? "No identity returned."}{Environment.NewLine}" +
+                    $"Boot 2: {boot2Identity?.Describe() ?? "No identity returned."}");
                 return;
             }
 
-            if (boot2Identity is null || !boot2Identity.HasStableIdentifiers)
-            {
-                ShowRetireError(
-                    "Boot 2 partition identity could not be recorded from the partition table, so nothing was " +
-                    "changed and the PC will not restart." + Environment.NewLine + Environment.NewLine +
-                    (boot2Identity?.Describe() ?? "No identity returned."));
-                return;
-            }
+            RetirementStateIdentityRequirements.ValidateForNewPending(
+                boot1.Identifier,
+                boot2.Identifier,
+                boot1Identity,
+                boot2Identity);
 
             services.Log.Info(
                 "retire-ui",

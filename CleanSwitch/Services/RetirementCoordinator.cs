@@ -69,8 +69,11 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
                 $"Boot 1 and Boot 2 resolved to the same BCD identifier ({BcdIdentifiers.Format(boot1Bcd)}). Refusing to continue.");
         }
 
-        EnsureStableIdentity(boot1Identity, "Boot 1");
-        EnsureStableIdentity(boot2Identity, "Boot 2");
+        RetirementStateIdentityRequirements.ValidateForNewPending(
+            boot1Id,
+            boot2Id,
+            boot1Identity,
+            boot2Identity);
 
         if (string.Equals(
                 boot1Identity.GptPartitionId?.Trim(),
@@ -133,18 +136,6 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
             $"stateVolume=[{state.StateVolumeIdentity?.Describe() ?? "unknown"}].");
         _store.Save(state);
         return state;
-    }
-
-    private static void EnsureStableIdentity(PartitionIdentity identity, string label)
-    {
-        if (identity.HasStableIdentifiers)
-        {
-            return;
-        }
-
-        throw new RetirementStateException(
-            $"{label} partition identity is incomplete: {identity.Describe()}. " +
-            "Need disk number, partition number and GPT unique partition GUID from the partition table.");
     }
 
     public RetirementState RecordBoot1Retired(RetirementState state, string reason, bool deletionOccurred)

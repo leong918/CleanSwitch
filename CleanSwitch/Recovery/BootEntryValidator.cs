@@ -182,16 +182,10 @@ public sealed class BootEntryValidator
     }
 
     /// <summary>
-    /// Describes a boot entry as stable identifiers. The BCD <c>device</c> text is always
-    /// recorded; when it carries a <c>partition=X:</c> letter that resolves in the current
-    /// environment, the partition table is also read so disk number, partition number and
-    /// GPT partition GUID are captured.
-    /// <para>
-    /// This is metadata only, and Phase 2A acts on none of it. The letter inside the BCD
-    /// device text is only meaningful in the environment that entry belongs to, so the
-    /// recorded <c>Source</c> says which environment resolved it. Phase 2B must re-verify
-    /// before trusting it.
-    /// </para>
+    /// Describes a boot entry from the live partition table. A BCD
+    /// <c>partition=X:</c> letter is used only to locate the volume in this
+    /// environment. Disk GPT id, partition GPT id, type, start offset and size
+    /// are then copied from the GPT table row, never from the letter itself.
     /// </summary>
     public async Task<PartitionIdentity?> TryDescribeBootEntryVolumeAsync(string bootGuid)
     {
@@ -218,7 +212,7 @@ public sealed class BootEntryValidator
 
     /// <summary>
     /// Resolves a BCD <c>partition=X:</c> device to the volume that letter currently means,
-    /// then to that volume's GPT partition identity. Silent no-op when the device text has no
+    /// then copies that volume's GPT table identity. Silent no-op when the device text has no
     /// letter or the letter does not resolve here.
     /// </summary>
     private void EnrichFromPartitionTable(PartitionIdentity identity, string entryIdentifier, string? bcdDevice)
@@ -249,22 +243,15 @@ public sealed class BootEntryValidator
             _log.Warn(
                 "boot-validator",
                 $"Volume '{volumeGuidPath}' for BCD entry {entryIdentifier} was not found in the partition " +
-                "table enumeration, so no disk, partition number or GPT id was recorded.");
+                "table enumeration, so no GPT identity was recorded.");
             return;
         }
 
-        identity.VolumeGuidPath = match.VolumeGuidPath;
-        identity.DiskNumber = match.DiskNumber;
-        identity.PartitionNumber = match.PartitionNumber;
-        identity.GptPartitionId = match.GptPartitionId;
-        identity.GptPartitionType = match.GptPartitionType is null
-            ? null
-            : VolumeLocator.FormatGptId(match.GptPartitionType.Value);
-        identity.ObservedDriveLetter = match.PrimaryMountPoint ?? mountPoint;
-        identity.Source =
-            $"BCD entry {entryIdentifier}, device '{bcdDevice}' resolved through the drive letter as seen by " +
-            "the currently running environment, then through the partition table (metadata only; re-verify " +
-            "before any destructive use)";
+        ApplyPartitionTableIdentity(
+            identity,
+            match,
+            $"BCD entry {entryIdentifier}, device '{bcdDevice}' used only to locate the volume; " +
+            "disk GPT id, partition GPT id, type, offset and size were read from the live partition table.");
 
         if (match.Outcome != VolumeIdentityOutcome.Identified)
         {
@@ -273,6 +260,31 @@ public sealed class BootEntryValidator
                 $"Partition identity for BCD entry {entryIdentifier} is incomplete ({match.Outcome}): " +
                 $"{match.Diagnostic}");
         }
+    }
+
+    /// <summary>
+    /// Copies GPT table fields from a located volume onto a capture identity.
+    /// Preserves <see cref="PartitionIdentity.BcdDevice"/>. Drive letters stay informational.
+    /// </summary>
+    public static void ApplyPartitionTableIdentity(
+        PartitionIdentity identity,
+        LocatedVolume located,
+        string source)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        ArgumentNullException.ThrowIfNull(located);
+
+        var table = located.ToPartitionIdentity(source);
+        identity.DiskNumber = table.DiskNumber;
+        identity.PartitionNumber = table.PartitionNumber;
+        identity.VolumeGuidPath = table.VolumeGuidPath;
+        identity.GptPartitionId = table.GptPartitionId;
+        identity.GptPartitionType = table.GptPartitionType;
+        identity.DiskGptUniqueId = table.DiskGptUniqueId;
+        identity.PartitionStartingOffset = table.PartitionStartingOffset;
+        identity.PartitionSizeBytes = table.PartitionSizeBytes;
+        identity.ObservedDriveLetter = table.ObservedDriveLetter;
+        identity.Source = table.Source;
     }
 
     /// <summary>Pulls <c>X:</c> out of BCD device text such as <c>partition=C:</c>.</summary>
