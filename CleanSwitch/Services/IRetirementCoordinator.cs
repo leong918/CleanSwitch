@@ -30,6 +30,13 @@ public interface IRetirementCoordinator
     /// <summary>Applies a validated transition and persists it. Illegal transitions throw.</summary>
     RetirementState Transition(RetirementState state, RetirementStatus target, string reason);
 
+    /// <summary>
+    /// Records that Boot 1 is gone (live delete or already-absent resume). Sets
+    /// <see cref="Models.RetirementState.DestructiveDeletionPerformed"/> and transitions to
+    /// BOOT1_RETIRED when that is a legal next status.
+    /// </summary>
+    RetirementState RecordBoot1Retired(RetirementState state, string reason, bool deletionOccurred);
+
     RetirementState MarkFailed(RetirementState state, string error);
 
     RetirementState MarkAborted(RetirementState state, string reason);

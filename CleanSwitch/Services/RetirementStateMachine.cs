@@ -30,7 +30,7 @@ public static class RetirementStateMachine
     private static readonly (RetirementStatus From, RetirementStatus To, string Why)[] Phase2ASkipEdges =
     [
         (RetirementStatus.Boot2Validated, RetirementStatus.BcdUpdated,
-            "Phase 2B-identify: BOOT1_RETIRED is skipped because deletion is not implemented.")
+            "BOOT1_RETIRED is skipped because live deletion is disabled in this build.")
     ];
 
     private static readonly Dictionary<RetirementStatus, HashSet<RetirementStatus>> Allowed = BuildTable();

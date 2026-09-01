@@ -10,6 +10,8 @@ internal static class Program
 {
     private const string RecoveryRunSwitch = "--recovery-run";
     private const string RecoveryDryRunSwitch = "--recovery-dry-run";
+    private const string RecoveryReviewSwitch = "--recovery-review";
+    private const string ExecuteDeletionSwitch = "--execute-deletion";
     private const string ListVolumesSwitch = "--list-volumes";
 
     [STAThread]
@@ -17,15 +19,28 @@ internal static class Program
     {
         var recoveryRun = HasSwitch(args, RecoveryRunSwitch);
         var recoveryDryRun = HasSwitch(args, RecoveryDryRunSwitch);
+        var recoveryReview = HasSwitch(args, RecoveryReviewSwitch);
+        var executeDeletion = HasSwitch(args, ExecuteDeletionSwitch);
 
         if (HasSwitch(args, ListVolumesSwitch))
         {
             return ListVolumes();
         }
 
-        if (recoveryRun || recoveryDryRun)
+        if (executeDeletion && !recoveryRun && !recoveryReview)
         {
-            return RunRecoverySide(recoveryDryRun);
+            ConsoleHost.Attach(allocateIfMissing: true);
+            Report("--execute-deletion is only accepted with --recovery-run or --recovery-review.");
+            Report("This invocation did not start diskpart.");
+            return 2;
+        }
+
+        if (recoveryRun || recoveryDryRun || recoveryReview)
+        {
+            return RunRecoverySide(new RecoveryRunRequest(
+                DryRun: recoveryDryRun && !recoveryRun,
+                ReviewOnly: recoveryReview && !recoveryRun,
+                ExecuteDeletion: executeDeletion));
         }
 
         ApplicationConfiguration.Initialize();
@@ -35,24 +50,25 @@ internal static class Program
 
     /// <summary>
     /// Headless entry point for the recovery environment:
-    /// <c>CleanSwitch.exe --recovery-run</c> performs the Phase 2A handoff,
-    /// <c>CleanSwitch.exe --recovery-dry-run</c> validates and logs without changing the BCD.
+    /// <c>--recovery-run</c> validates and hands off to Boot 2.
+    /// <c>--recovery-dry-run</c> validates and prints the deletion plan.
+    /// <c>--recovery-review</c> prints the live-delete review without changing state or disks.
+    /// <c>--execute-deletion</c> is the runtime opt-in; it does nothing while live delete is disabled.
     /// </summary>
-    private static int RunRecoverySide(bool dryRun)
+    private static int RunRecoverySide(RecoveryRunRequest request)
     {
         ConsoleHost.Attach();
 
         try
         {
             var options = AppConfiguration.Load();
-            var services = RetirementServices.Create(
-                options,
-                dryRun ? "recovery-dryrun" : "recovery");
+            var prefix = request.ReviewOnly ? "recovery-review" : request.DryRun ? "recovery-dryrun" : "recovery";
+            var services = RetirementServices.Create(options, prefix);
 
             Report($"Retirement state file: {services.Coordinator.StateFilePath}");
             Report($"Log destinations: {string.Join("; ", services.Log.Destinations)}");
 
-            var result = services.RecoveryRunner.RunAsync(dryRun).GetAwaiter().GetResult();
+            var result = services.RecoveryRunner.RunAsync(request).GetAwaiter().GetResult();
             Report($"{result.Outcome}: {result.Message}");
 
             return result.Outcome == RecoveryRunOutcome.Failed ? 1 : 0;
