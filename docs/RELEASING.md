@@ -39,10 +39,17 @@ the WinForms stack is what accounts for the size.
 4. The `Release` workflow (`.github/workflows/release.yml`) picks up the `v*` tag
    and does the rest: publishes, verifies, zips, creates the GitHub Release, and
    attaches the zip. Watch it under the repository's **Actions** tab.
+   If a Release for that tag already exists (for example you created it from the
+   GitHub UI and it only has source zips), the workflow **uploads the build zip
+   onto the existing Release** instead of failing.
 5. Check the published release page and the attached zip, then announce it.
    (The workflow publishes directly rather than drafting. If you would rather
    review before it goes live, add `--draft` to the `gh release create` call in
    the workflow.)
+
+Do not push the same tag twice. A second workflow run on `v1.0.1` used to fail
+with "a release with the same tag name already exists". After the upload-if-exists
+change, a re-run attaches the zip; it still will not create a second Release.
 
 Tag names must start with `v`. A tag such as `v1.2.0-rc1` is published as a
 GitHub **prerelease** automatically (any version containing `-` is treated as a

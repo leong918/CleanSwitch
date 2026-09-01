@@ -165,12 +165,24 @@ jobs:
           )
           Set-Content -Path release-notes.md -Value $notes -Encoding utf8
 
-          $ghArgs = @(
-            $env:TAG, $env:ZIP,
-            '--title',      "CleanSwitch $env:VERSION",
-            '--notes-file', 'release-notes.md',
-            '--verify-tag'
-          )
-          if ($env:PRERELEASE -eq 'true') { $ghArgs += '--prerelease' }
+          # GitHub can already have a Release for this tag (created from the UI
+          # or a previous run). `gh release create` then fails and the zip never
+          # gets attached — that is why v1.0.1 showed source archives only.
+          $releaseExists = $false
+          gh release view $env:TAG --json tagName 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { $releaseExists = $true }
 
-          gh release create @ghArgs
+          if ($releaseExists) {
+            Write-Host "Release $env:TAG already exists; uploading $env:ZIP onto it."
+            gh release upload $env:TAG $env:ZIP --clobber
+          }
+          else {
+            $ghArgs = @(
+              $env:TAG, $env:ZIP,
+              '--title',      "CleanSwitch $env:VERSION",
+              '--notes-file', 'release-notes.md',
+              '--verify-tag'
+            )
+            if ($env:PRERELEASE -eq 'true') { $ghArgs += '--prerelease' }
+            gh release create @ghArgs
+          }
