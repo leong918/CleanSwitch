@@ -1,8 +1,8 @@
 # Tasks left
 
-Last updated 2026-08-28. Phase 2A passed on hardware. Phase 2B identification passed. Deletion plan is report-only; live delete is still off.
+Last updated 2026-09-01. Phase 2B dry-run passed on hardware. Live delete is implemented behind guards and is still off.
 
-Live deletion of Boot 1 is **not** in the current build. `--recovery-dry-run` prints the partition that would be removed.
+Live deletion of Boot 1 will not run in this build: `DestructiveOperationsImplemented` and `EnableDestructiveRetirement` are both false. Use `--recovery-review` to print the live path without changing a disk.
 
 | Status | Meaning |
 | --- | --- |
@@ -28,9 +28,9 @@ Live deletion of Boot 1 is **not** in the current build. `--recovery-dry-run` pr
 
 7. **Done (identify only).** Boot 1 and Boot 2 `PartitionIdentity` (disk, partition, GPT GUID) are recorded at PENDING. WinRE looks them up by GPT GUID, not drive letter.
 8. **Done (gate only).** `DiskValidator.ValidateRetirementTarget` is a hard gate: disk+partition and GPT id must agree; target must not be the running volume, ESP, MSR, Recovery, or Boot 2. Passing prints `TARGET_VALIDATED`. Deletion is still not implemented.
-9. **Done (plan only).** `RetirementExecutor` names the Boot 1 partition (disk, partition, GPT unique id, size) and the diskpart script that would remove it. `RetireBoot1Async` still refuses. `DestructiveOperationsImplemented` and `EnableDestructiveRetirement` remain false. No diskpart process is started. Review the dry-run plan on this PC before any later live-delete work.
-10. **Blocked** on live deletion (not on the plan). Prove resume: power loss between `BOOT1_RETIRED` and `VERIFIED` must not delete again. `destructiveDeletionPerformed` exists for this.
-11. **Blocked** on live deletion. Set `"phase": "2B"` only on newly created state files after live 2B is enabled.
+9. **Done (disabled).** Live `diskpart` delete of pinned Boot 1 (disk 0 / partition 3 / `{eab2ae6c-…}`) is implemented in `RetirementExecutor`. All guards stay false. `--execute-deletion` is required at runtime in addition to the two flags. No wipe has been run on this PC.
+10. **Done (code, not hardware).** Resume: if `destructiveDeletionPerformed` or status is `BOOT1_RETIRED+`, diskpart is skipped. If Boot 1 GPT is already gone and Boot 2 is unique, `AcknowledgeAlreadyDeleted` records `BOOT1_RETIRED` without starting diskpart. Still unproven after a real wipe.
+11. **Blocked** on enabling live 2B. Set `"phase": "2B"` only on newly created state files after the flags are flipped.
 
 ## Phase 2C — BCD cleanup and space
 

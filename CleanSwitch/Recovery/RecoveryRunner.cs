@@ -14,20 +14,23 @@ public enum RecoveryRunOutcome
     /// <summary>Nothing to do: no state file, or the operation is already finished.</summary>
     NothingToDo,
 
+    /// <summary>Live-delete review printed. No disk, BCD or state change.</summary>
+    ReviewCompleted,
+
     /// <summary>Refused or failed. No boot change was made.</summary>
     Failed
 }
 
+public sealed record RecoveryRunRequest(bool DryRun, bool ReviewOnly, bool ExecuteDeletion);
+
 public sealed record RecoveryRunResult(RecoveryRunOutcome Outcome, string Message);
 
 /// <summary>
-/// The recovery-side half of the retirement flow. Invoked with <c>--recovery-run</c> (or
-/// <c>--recovery-dry-run</c>) from a recovery environment command prompt.
+/// Recovery-side retirement flow.
 /// <para>
-/// PHASE 2B-plan BEHAVIOUR: load the state file, hard-gate target identity, print a
-/// report-only deletion plan, SKIP LIVE DELETION, point the next boot at Boot 2 and
-/// restart. Nothing is deleted, formatted or removed. <see cref="RetirementExecutor.RetireBoot1Async"/>
-/// is not called.
+/// Live diskpart is compiled in <see cref="RetirementExecutor"/> but is not reached while
+/// <c>DestructiveOperationsImplemented</c> is false. <c>--recovery-run</c> without
+/// <c>--execute-deletion</c> skips deletion and hands off to Boot 2.
 /// </para>
 /// </summary>
 public sealed class RecoveryRunner
@@ -58,13 +61,15 @@ public sealed class RecoveryRunner
         _log = log ?? NullOperationLog.Instance;
     }
 
-    /// <param name="dryRun">
-    /// When true, every validation and state transition runs but the BCD is not changed and
-    /// the PC is not restarted. This is the safe way to exercise the flow.
-    /// </param>
-    public async Task<RecoveryRunResult> RunAsync(bool dryRun)
+    public async Task<RecoveryRunResult> RunAsync(RecoveryRunRequest request)
     {
-        _log.Info("recovery", $"Recovery-side run starting. dryRun={dryRun}, phase=2B-plan (non-destructive).");
+        ArgumentNullException.ThrowIfNull(request);
+        _log.Info(
+            "recovery",
+            $"Recovery-side run starting. dryRun={request.DryRun} reviewOnly={request.ReviewOnly} " +
+            $"executeDeletion={request.ExecuteDeletion} " +
+            $"destructiveImplemented={_executor.IsDestructiveRetirementAvailable} " +
+            $"enableDestructiveRetirement={_options.EnableDestructiveRetirement}.");
 
         RetirementState? state;
         try
@@ -74,7 +79,20 @@ public sealed class RecoveryRunner
         catch (RetirementStorageException exception)
         {
             _log.Warn("recovery", $"Could not load retirement state: {exception.Message}");
+            if (request.ReviewOnly)
+            {
+                return new RecoveryRunResult(
+                    RecoveryRunOutcome.ReviewCompleted,
+                    _executor.DescribeLiveDeleteReview(request.ExecuteDeletion) +
+                    Environment.NewLine + exception.Message);
+            }
+
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, exception.Message);
+        }
+
+        if (request.ReviewOnly)
+        {
+            return RunReview(state, request.ExecuteDeletion);
         }
 
         if (state is null)
@@ -98,17 +116,17 @@ public sealed class RecoveryRunner
 
         try
         {
-            return await RunCoreAsync(loaded, dryRun);
+            return await RunCoreAsync(loaded, request);
         }
         catch (RetirementNotImplementedException exception)
         {
-            // Live deletion must never run in this build. If RetireBoot1Async is reached, stop hard.
-            SafeMarkFailed(loaded, "Destructive path was reached in Phase 2A: " + exception.Message);
+            SafeMarkFailed(loaded, "Live deletion is disabled: " + exception.Message);
             _log.Warn("recovery", $"REFUSED: {exception.Message}");
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, exception.Message);
         }
         catch (Exception exception) when (
-            exception is BootManagerException or RetirementStateException or RetirementStorageException)
+            exception is RetirementExecutionException or BootManagerException
+                or RetirementStateException or RetirementStorageException)
         {
             SafeMarkFailed(loaded, exception.Message);
             _log.Warn("recovery", $"Recovery run failed: {exception.Message}");
@@ -116,7 +134,41 @@ public sealed class RecoveryRunner
         }
     }
 
-    private async Task<RecoveryRunResult> RunCoreAsync(RetirementState state, bool dryRun)
+    private RecoveryRunResult RunReview(RetirementState? state, bool executeDeletion)
+    {
+        var review = _executor.DescribeLiveDeleteReview(executeDeletion);
+        if (state is null || state.IsTerminal)
+        {
+            return new RecoveryRunResult(RecoveryRunOutcome.ReviewCompleted, review);
+        }
+
+        var identification = IdentifyTarget(state);
+        var planText = string.Empty;
+        if (identification.Passed && !identification.AlreadyAbsent &&
+            state.Boot1Identity is not null && identification.ObservedBoot1 is not null)
+        {
+            var plan = _executor.BuildDeletionPlan(
+                state.Boot1Identity,
+                identification.ObservedBoot1,
+                state.Boot2Identity,
+                identification.Report,
+                explicitOptIn: executeDeletion,
+                boot1BcdId: state.Boot1Id);
+            planText = Environment.NewLine + plan.Describe();
+        }
+        else
+        {
+            planText = Environment.NewLine + identification.Describe();
+        }
+
+        _log.Info("recovery", review);
+        return new RecoveryRunResult(
+            RecoveryRunOutcome.ReviewCompleted,
+            review + planText + Environment.NewLine +
+            "Review mode: no state transition, no diskpart, no BCD change, no restart.");
+    }
+
+    private async Task<RecoveryRunResult> RunCoreAsync(RetirementState state, RecoveryRunRequest request)
     {
         if (state.Status is RetirementStatus.Pending or RetirementStatus.Failed)
         {
@@ -136,14 +188,12 @@ public sealed class RecoveryRunner
 
         if (state.Status == RetirementStatus.Verified)
         {
-            // A previous run already completed the handoff and was interrupted before the
-            // restart. Re-running must not redo the BCD work, only the restart.
             var resumeMessage =
                 $"Handoff was already verified for Boot 2 ({state.Boot2Id}). " +
-                (dryRun ? "Dry run: not restarting." : "Restarting only.");
+                (request.DryRun ? "Dry run: not restarting." : "Restarting only.");
             _log.Info("recovery", resumeMessage);
 
-            if (dryRun)
+            if (request.DryRun)
             {
                 return new RecoveryRunResult(RecoveryRunOutcome.DryRunCompleted, resumeMessage);
             }
@@ -152,8 +202,20 @@ public sealed class RecoveryRunner
             return new RecoveryRunResult(RecoveryRunOutcome.HandoffScheduled, resumeMessage);
         }
 
-        // ---- Phase 2B-identify: hard gate. No deletion. ----
-        var identification = IdentifyTarget(state);
+        var deletionAlreadySettled = IsDeletionAlreadySettled(state);
+        TargetIdentification identification;
+        RetirementDeletionPlan? deletionPlan = null;
+
+        if (deletionAlreadySettled)
+        {
+            identification = IdentifyBoot2Only(state);
+            _log.Info("recovery", _executor.AcknowledgeAlreadyRecorded().Message);
+        }
+        else
+        {
+            identification = IdentifyTarget(state);
+        }
+
         if (!identification.Passed)
         {
             var message =
@@ -163,7 +225,10 @@ public sealed class RecoveryRunner
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
         }
 
-        state.Boot1IdentityObserved = identification.ObservedBoot1;
+        if (identification.ObservedBoot1 is not null)
+        {
+            state.Boot1IdentityObserved = identification.ObservedBoot1;
+        }
 
         if (state.Status == RetirementStatus.RecoveryStarted)
         {
@@ -173,37 +238,39 @@ public sealed class RecoveryRunner
                 identification.Summary);
         }
 
-        _log.Info("recovery", "TARGET_VALIDATED");
+        _log.Info("recovery", identification.AlreadyAbsent ? "TARGET already absent" : "TARGET_VALIDATED");
         _log.Info("recovery", identification.Describe());
 
-        if (state.Boot1Identity is null || identification.ObservedBoot1 is null)
+        if (!deletionAlreadySettled && !identification.AlreadyAbsent)
         {
-            var message =
-                "TARGET_VALIDATED was recorded without Boot 1 identities. Refusing to continue. " +
-                "No partition was changed.";
-            _coordinator.MarkFailed(state, message);
-            return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
+            if (state.Boot1Identity is null || identification.ObservedBoot1 is null)
+            {
+                var message =
+                    "TARGET_VALIDATED was recorded without Boot 1 identities. Refusing to continue. " +
+                    "No partition was changed.";
+                _coordinator.MarkFailed(state, message);
+                return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
+            }
+
+            deletionPlan = _executor.BuildDeletionPlan(
+                expectedBoot1: state.Boot1Identity,
+                observedBoot1: identification.ObservedBoot1,
+                boot2: state.Boot2Identity,
+                validation: identification.Report,
+                explicitOptIn: request.ExecuteDeletion,
+                boot1BcdId: state.Boot1Id);
+            _log.Info("recovery", deletionPlan.Describe());
         }
 
-        var deletionPlan = _executor.BuildDeletionPlan(
-            expectedBoot1: state.Boot1Identity,
-            observedBoot1: identification.ObservedBoot1,
-            boot2: state.Boot2Identity,
-            validation: identification.Report,
-            explicitOptIn: false,
-            boot1BcdId: state.Boot1Id);
-        _log.Info("recovery", deletionPlan.Describe());
-
-        if (dryRun)
+        if (request.DryRun)
         {
             var dryRunMessage =
-                "TARGET_VALIDATED" + Environment.NewLine + identification.Describe() + Environment.NewLine +
-                deletionPlan.Describe() + Environment.NewLine +
+                identification.Describe() + Environment.NewLine +
+                (deletionPlan?.Describe() ?? string.Empty) + Environment.NewLine +
                 "Dry run: deletion was not attempted and the BCD was not changed.";
             return new RecoveryRunResult(RecoveryRunOutcome.DryRunCompleted, dryRunMessage);
         }
 
-        // ---- Boot 2 must be a real, distinct Windows loader before we hand control over. ----
         var boot2Report = await _bootEntryValidator.ValidateBoot2EntryAsync(state.Boot2Id, state.Boot1Id);
         if (!boot2Report.Passed)
         {
@@ -219,18 +286,11 @@ public sealed class RecoveryRunner
             state = _coordinator.Transition(
                 state,
                 RetirementStatus.Boot2Validated,
-                "Boot 2 BCD entry validated. Live deletion remains disabled; the deletion plan was reported only.");
+                "Boot 2 BCD entry validated.");
         }
 
-        // ---- Deletion: plan was reported above. Live diskpart is not invoked. ----
-        _log.Warn(
-            "recovery",
-            "PHASE 2B-plan: Boot 1 deletion is SKIPPED. RetireBoot1Async is not called, no partition is " +
-            "touched, and no BCD entry is removed. " +
-            $"Destructive implementation available={_executor.IsDestructiveRetirementAvailable} " +
-            $"executionAuthorised={deletionPlan.ExecutionAuthorised}.");
+        state = await ApplyDeletionOrSkipAsync(state, request, identification, deletionPlan);
 
-        // ---- Hand off to Boot 2. ----
         await _bootManager.SetNextBootAsync(state.Boot2Id);
 
         if (state.Status != RetirementStatus.BcdUpdated)
@@ -238,7 +298,7 @@ public sealed class RecoveryRunner
             state = _coordinator.Transition(
                 state,
                 RetirementStatus.BcdUpdated,
-                $"One-time boot sequence set to Boot 2 ({state.Boot2Id}).");
+                $"One-time boot sequence set to Boot 2 ({state.Boot2Id}). Boot 1 BCD object was not deleted.");
         }
 
         var verification = await _bootManager.TryGetEntryAsync(state.Boot2Id);
@@ -265,8 +325,112 @@ public sealed class RecoveryRunner
         return new RecoveryRunResult(
             RecoveryRunOutcome.HandoffScheduled,
             $"Boot 2 ({state.Boot2Id}) set as the next boot and a restart was scheduled in " +
-            $"{_options.RestartDelaySeconds} second(s). Nothing was deleted." +
-            Environment.NewLine + deletionPlan.Describe());
+            $"{_options.RestartDelaySeconds} second(s). " +
+            $"destructiveDeletionPerformed={state.DestructiveDeletionPerformed}." +
+            Environment.NewLine + (deletionPlan?.Describe() ?? string.Empty));
+    }
+
+    private async Task<RetirementState> ApplyDeletionOrSkipAsync(
+        RetirementState state,
+        RecoveryRunRequest request,
+        TargetIdentification identification,
+        RetirementDeletionPlan? deletionPlan)
+    {
+        if (IsDeletionAlreadySettled(state))
+        {
+            _log.Info(
+                "recovery",
+                "Deletion already settled (destructiveDeletionPerformed or BOOT1_RETIRED+). " +
+                "diskpart will not run again.");
+            return state;
+        }
+
+        if (identification.AlreadyAbsent)
+        {
+            if (state.Boot1Identity is null || state.Boot2Identity is null)
+            {
+                throw new RetirementExecutionException(
+                    "Already-absent resume needs recorded Boot 1 and Boot 2 identities.");
+            }
+
+            var acknowledged = _executor.AcknowledgeAlreadyDeleted(state.Boot1Identity, state.Boot2Identity);
+            return _coordinator.RecordBoot1Retired(
+                state,
+                acknowledged.Message,
+                deletionOccurred: false);
+        }
+
+        var liveEnabled = _executor.IsDestructiveRetirementAvailable && _executor.IsConfigEnabled;
+        if (!liveEnabled || !request.ExecuteDeletion)
+        {
+            _log.Warn(
+                "recovery",
+                "Live Boot 1 deletion is SKIPPED. " +
+                $"DestructiveOperationsImplemented={_executor.IsDestructiveRetirementAvailable} " +
+                $"EnableDestructiveRetirement={_executor.IsConfigEnabled} " +
+                $"executeDeletion={request.ExecuteDeletion} " +
+                $"planAuthorised={deletionPlan?.ExecutionAuthorised ?? false}. " +
+                "RetireBoot1Async is not called. No partition is touched. No BCD object is removed.");
+            return state;
+        }
+
+        if (state.Boot1Identity is null || identification.ObservedBoot1 is null || state.Boot2Identity is null)
+        {
+            throw new RetirementExecutionException(
+                "Live deletion refused: Boot 1/Boot 2 identities are incomplete.");
+        }
+
+        var result = await _executor.RetireBoot1Async(
+            state.Boot1Identity,
+            identification.ObservedBoot1,
+            state.Boot2Identity,
+            identification.Report,
+            explicitOptIn: true);
+
+        _log.Info(
+            "recovery",
+            $"Deletion result kind={result.Kind} destructiveDeletionOccurred={result.DestructiveDeletionOccurred} " +
+            result.Message);
+
+        return _coordinator.RecordBoot1Retired(
+            state,
+            result.Message,
+            deletionOccurred: result.DestructiveDeletionOccurred);
+    }
+
+    private static bool IsDeletionAlreadySettled(RetirementState state) =>
+        state.DestructiveDeletionPerformed ||
+        state.Status is RetirementStatus.Boot1Retired
+            or RetirementStatus.BcdUpdated
+            or RetirementStatus.Verified;
+
+    private TargetIdentification IdentifyBoot2Only(RetirementState state)
+    {
+        var report = new ValidationReport("Resume after Boot 1 already retired");
+        if (state.Boot2Identity is null || !state.Boot2Identity.HasStableIdentifiers)
+        {
+            report.Fail("boot2-identity-recorded", "Boot 2 identity is missing; cannot resume safely.");
+            return TargetIdentification.Failed(report);
+        }
+
+        var observedBoot2 = _diskValidator.TryObserveByGptId(
+            state.Boot2Identity.GptPartitionId,
+            "WinRE observation of Boot 2 after Boot 1 retirement",
+            out var boot2Error);
+        if (observedBoot2 is null)
+        {
+            report.Fail("boot2-observed-by-gpt", boot2Error ?? "Boot 2 GPT GUID was not found.");
+            return TargetIdentification.Failed(report);
+        }
+
+        report.Pass("boot2-still-present", observedBoot2.Describe());
+        report.Pass("deletion-already-settled", "diskpart will not run again.");
+        return new TargetIdentification(
+            true,
+            false,
+            "Boot 2 still present after prior Boot 1 retirement.",
+            null,
+            report);
     }
 
     private TargetIdentification IdentifyTarget(RetirementState state)
@@ -278,8 +442,7 @@ public sealed class RecoveryRunner
             var report = new ValidationReport("Retirement target (identification gate)");
             report.Fail(
                 "boot1-identity-recorded",
-                "Boot 1 partition identity was not recorded at PENDING time with disk+partition and GPT unique id. " +
-                "Re-run RETIRE SYSTEM from Boot 1 with the 2B-identify build.");
+                "Boot 1 partition identity was not recorded at PENDING time with disk+partition and GPT unique id.");
             return TargetIdentification.Failed(report);
         }
 
@@ -288,18 +451,7 @@ public sealed class RecoveryRunner
             var report = new ValidationReport("Retirement target (identification gate)");
             report.Fail(
                 "boot2-identity-recorded",
-                "Boot 2 partition identity was not recorded at PENDING time. Re-run RETIRE SYSTEM from Boot 1.");
-            return TargetIdentification.Failed(report);
-        }
-
-        var observedBoot1 = _diskValidator.TryObserveByGptId(
-            state.Boot1Identity.GptPartitionId,
-            "WinRE observation of Boot 1 by recorded GPT unique partition GUID",
-            out var boot1Error);
-        if (observedBoot1 is null)
-        {
-            var report = new ValidationReport("Retirement target (identification gate)");
-            report.Fail("boot1-observed-by-gpt", boot1Error ?? "Boot 1 GPT GUID was not found in this environment.");
+                "Boot 2 partition identity was not recorded at PENDING time.");
             return TargetIdentification.Failed(report);
         }
 
@@ -314,20 +466,37 @@ public sealed class RecoveryRunner
             return TargetIdentification.Failed(report);
         }
 
-        if (!string.Equals(
-                observedBoot2.GptPartitionId?.Trim(),
-                state.Boot2Identity.GptPartitionId?.Trim(),
-                StringComparison.OrdinalIgnoreCase))
-        {
-            var report = new ValidationReport("Retirement target (identification gate)");
-            report.Fail(
-                "boot2-gpt-resolved",
-                $"Boot 2 GPT GUID in this environment is {observedBoot2.GptPartitionId}; " +
-                $"expected {state.Boot2Identity.GptPartitionId}.");
-            return TargetIdentification.Failed(report);
-        }
-
         _log.Info("recovery", $"Boot 2 still present: {observedBoot2.Describe()}");
+
+        var observedBoot1 = _diskValidator.TryObserveByGptId(
+            state.Boot1Identity.GptPartitionId,
+            "WinRE observation of Boot 1 by recorded GPT unique partition GUID",
+            out var boot1Error);
+        if (observedBoot1 is null)
+        {
+            var snapshot = _executor.ReadPinnedSnapshot();
+            if (snapshot.Boot1Count == 0 && snapshot.Boot2Count == 1)
+            {
+                var report = new ValidationReport("Retirement target (already absent)");
+                report.Pass(
+                    "boot1-gpt-absent",
+                    boot1Error ?? "Boot 1 GPT unique id has zero matches.");
+                report.Pass("boot2-still-unique", observedBoot2.Describe());
+                return new TargetIdentification(
+                    true,
+                    true,
+                    "Boot 1 GPT is already absent; Boot 2 GPT is still unique. diskpart will not run.",
+                    null,
+                    report);
+            }
+
+            var failed = new ValidationReport("Retirement target (identification gate)");
+            failed.Fail(
+                "boot1-observed-by-gpt",
+                (boot1Error ?? "Boot 1 GPT GUID was not found.") +
+                $" boot1Matches={snapshot.Boot1Count} boot2Matches={snapshot.Boot2Count}.");
+            return TargetIdentification.Failed(failed);
+        }
 
         var reportGate = _diskValidator.ValidateRetirementTarget(
             state.Boot1Identity,
@@ -336,6 +505,7 @@ public sealed class RecoveryRunner
 
         return new TargetIdentification(
             reportGate.Passed,
+            false,
             reportGate.Passed
                 ? "TARGET_VALIDATED: Boot 1 identity matched in WinRE; Boot 2 GPT GUID still present; " +
                   "target is not WinRE, ESP, Boot 2 or Recovery."
@@ -346,6 +516,7 @@ public sealed class RecoveryRunner
 
     private sealed record TargetIdentification(
         bool Passed,
+        bool AlreadyAbsent,
         string Summary,
         PartitionIdentity? ObservedBoot1,
         ValidationReport Report)
@@ -353,7 +524,7 @@ public sealed class RecoveryRunner
         public string Describe() => Report.Describe();
 
         public static TargetIdentification Failed(ValidationReport report) =>
-            new(false, "TARGET validation failed.", null, report);
+            new(false, false, "TARGET validation failed.", null, report);
     }
 
     private void SafeMarkFailed(RetirementState state, string error)

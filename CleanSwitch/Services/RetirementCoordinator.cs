@@ -125,6 +125,30 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
             "Need disk number, partition number and GPT unique partition GUID from the partition table.");
     }
 
+    public RetirementState RecordBoot1Retired(RetirementState state, string reason, bool deletionOccurred)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+
+        state.DestructiveDeletionPerformed = true;
+        _log.Info(
+            "coordinator",
+            "Recording Boot 1 retired. " +
+            $"destructiveDeletionPerformed=true deletionOccurredThisInvocation={deletionOccurred} " +
+            $"status={RetirementStatusNames.ToWire(state.Status)}");
+
+        if (state.Status is RetirementStatus.Boot1Retired
+            or RetirementStatus.BcdUpdated
+            or RetirementStatus.Verified
+            or RetirementStatus.Complete)
+        {
+            state.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            _store.Save(state);
+            return state;
+        }
+
+        return Transition(state, RetirementStatus.Boot1Retired, reason);
+    }
+
     public RetirementState Transition(RetirementState state, RetirementStatus target, string reason)
     {
         ArgumentNullException.ThrowIfNull(state);
