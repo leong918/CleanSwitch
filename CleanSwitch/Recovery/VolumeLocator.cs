@@ -82,6 +82,9 @@ public sealed class LocatedVolume
     /// <summary>GPT partition type GUID (Basic Data, EFI System, Microsoft Reserved, ...).</summary>
     public Guid? GptPartitionType { get; init; }
 
+    /// <summary>GPT unique disk GUID from DRIVE_LAYOUT_INFORMATION_GPT.DiskId.</summary>
+    public Guid? DiskGptUniqueId { get; init; }
+
     public long? PartitionStartingOffset { get; init; }
 
     /// <summary>Size of the backing partition, from the partition table.</summary>
@@ -120,6 +123,9 @@ public sealed class LocatedVolume
         VolumeGuidPath = VolumeGuidPath,
         GptPartitionId = GptPartitionId,
         GptPartitionType = GptPartitionType is null ? null : VolumeLocator.FormatGptId(GptPartitionType.Value),
+        DiskGptUniqueId = DiskGptUniqueId is null ? null : VolumeLocator.FormatGptId(DiskGptUniqueId.Value),
+        PartitionStartingOffset = PartitionStartingOffset,
+        PartitionSizeBytes = PartitionSizeBytes,
         ObservedDriveLetter = PrimaryMountPoint,
         Source = source
     };
@@ -145,6 +151,24 @@ public sealed class LocatedVolume
             : bytes >= 1_000_000_000
                 ? $"{bytes.Value / 1_000_000_000.0:0.##} GB"
                 : $"{bytes.Value / 1_000_000.0:0.##} MB";
+}
+
+/// <summary>One GPT partition table row. Exists even when the partition has no volume.</summary>
+public sealed class LocatedGptPartition
+{
+    public required int DiskNumber { get; init; }
+
+    public Guid? DiskGptUniqueId { get; init; }
+
+    public required int PartitionNumber { get; init; }
+
+    public required Guid GptPartitionId { get; init; }
+
+    public Guid? GptPartitionType { get; init; }
+
+    public required long StartingOffset { get; init; }
+
+    public required long SizeBytes { get; init; }
 }
 
 /// <summary>Outcome of one full enumeration pass. Never partial without saying so.</summary>
@@ -229,6 +253,33 @@ public static class VolumeLocator
 
         error = null;
         return matches[0];
+    }
+
+    /// <summary>
+    /// Reads every GPT partition on one disk from the partition table, including
+    /// partitions that have no volume (MSR). Query-only.
+    /// </summary>
+    public static IReadOnlyList<LocatedGptPartition> ReadGptTable(int diskNumber)
+    {
+        var layout = ReadDriveLayout(diskNumber);
+        if (layout.Error is not null)
+        {
+            return [];
+        }
+
+        return layout.Partitions
+            .Where(partition => partition.GptPartitionId is not null)
+            .Select(partition => new LocatedGptPartition
+            {
+                DiskNumber = diskNumber,
+                DiskGptUniqueId = layout.DiskGptUniqueId,
+                PartitionNumber = partition.PartitionNumber,
+                GptPartitionId = partition.GptPartitionId!.Value,
+                GptPartitionType = partition.GptPartitionType,
+                StartingOffset = partition.StartingOffset,
+                SizeBytes = partition.PartitionLength
+            })
+            .ToList();
     }
 
     /// <summary>
@@ -393,6 +444,7 @@ public static class VolumeLocator
             GptPartitionGuid = isGpt ? partition.GptPartitionId : null,
             GptPartitionId = isGpt ? FormatGptId(partition.GptPartitionId!.Value) : null,
             GptPartitionType = isGpt ? partition.GptPartitionType : null,
+            DiskGptUniqueId = layout.DiskGptUniqueId,
             PartitionStartingOffset = partition.StartingOffset,
             PartitionSizeBytes = partition.PartitionLength,
             FileSystem = fileSystem,
@@ -655,6 +707,16 @@ public static class VolumeLocator
 
         var style = BitConverter.ToInt32(buffer, 0);
         var declaredCount = BitConverter.ToInt32(buffer, 4);
+        Guid? diskGptId = null;
+        if (style == PartitionStyleGpt && bytesReturned >= 24)
+        {
+            var parsed = ReadGuid(buffer, 8);
+            if (parsed != Guid.Empty)
+            {
+                diskGptId = parsed;
+            }
+        }
+
         var available = (bytesReturned - DriveLayoutHeaderSize) / PartitionInformationExSize;
         var count = Math.Clamp(declaredCount, 0, available);
 
@@ -685,7 +747,7 @@ public static class VolumeLocator
             partitions.Add(new PartitionTableEntry(number, startingOffset, length, gptId, gptType));
         }
 
-        return DiskLayout.Success(style, partitions);
+        return DiskLayout.Success(style, diskGptId, partitions);
     }
 
     private static Guid ReadGuid(byte[] buffer, int offset) =>
@@ -759,9 +821,15 @@ public static class VolumeLocator
 
     private sealed class DiskLayout
     {
-        private DiskLayout(int partitionStyle, IReadOnlyList<PartitionTableEntry> partitions, string? error, bool accessDenied)
+        private DiskLayout(
+            int partitionStyle,
+            Guid? diskGptUniqueId,
+            IReadOnlyList<PartitionTableEntry> partitions,
+            string? error,
+            bool accessDenied)
         {
             PartitionStyle = partitionStyle;
+            DiskGptUniqueId = diskGptUniqueId;
             Partitions = partitions;
             Error = error;
             AccessDenied = accessDenied;
@@ -769,16 +837,22 @@ public static class VolumeLocator
 
         public int PartitionStyle { get; }
 
+        public Guid? DiskGptUniqueId { get; }
+
         public IReadOnlyList<PartitionTableEntry> Partitions { get; }
 
         public string? Error { get; }
 
         public bool AccessDenied { get; }
 
-        public static DiskLayout Success(int partitionStyle, IReadOnlyList<PartitionTableEntry> partitions) =>
-            new(partitionStyle, partitions, null, false);
+        public static DiskLayout Success(
+            int partitionStyle,
+            Guid? diskGptUniqueId,
+            IReadOnlyList<PartitionTableEntry> partitions) =>
+            new(partitionStyle, diskGptUniqueId, partitions, null, false);
 
-        public static DiskLayout Failed(string error, bool accessDenied) => new(PartitionStyleRaw, [], error, accessDenied);
+        public static DiskLayout Failed(string error, bool accessDenied) =>
+            new(PartitionStyleRaw, null, [], error, accessDenied);
     }
 
     // ---- Win32 constants -------------------------------------------------------------

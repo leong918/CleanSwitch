@@ -28,9 +28,12 @@ public sealed record RecoveryRunResult(RecoveryRunOutcome Outcome, string Messag
 /// <summary>
 /// Recovery-side retirement flow.
 /// <para>
-/// Live diskpart is compiled in <see cref="RetirementExecutor"/> but is not reached while
-/// <c>DestructiveOperationsImplemented</c> is false. <c>--recovery-run</c> without
-/// <c>--execute-deletion</c> skips deletion and hands off to Boot 2.
+/// Live disk deletion is compiled in <see cref="DestructiveRetirementEngine"/> but is not
+/// reached while <c>DestructiveOperationsImplemented</c> is false.
+/// Phase 2C BCD deletion is compiled in <see cref="DestructiveBcdRetirementEngine"/> but
+/// is not called from this runner while <c>BcdOperationsImplemented</c> is false.
+/// <c>--recovery-run</c> without <c>--execute-deletion</c> skips deletion and hands
+/// off to Boot 2. <c>--recovery-review</c> never starts a disk or BCD delete command.
 /// </para>
 /// </summary>
 public sealed class RecoveryRunner
@@ -40,6 +43,7 @@ public sealed class RecoveryRunner
     private readonly DiskValidator _diskValidator;
     private readonly BootEntryValidator _bootEntryValidator;
     private readonly RetirementExecutor _executor;
+    private readonly RetirementHardwareReview _hardwareReview;
     private readonly CleanSwitchOptions _options;
     private readonly IOperationLog _log;
 
@@ -50,7 +54,8 @@ public sealed class RecoveryRunner
         BootEntryValidator bootEntryValidator,
         RetirementExecutor executor,
         CleanSwitchOptions options,
-        IOperationLog? log = null)
+        IOperationLog? log = null,
+        RetirementHardwareReview? hardwareReview = null)
     {
         _bootManager = bootManager ?? throw new ArgumentNullException(nameof(bootManager));
         _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
@@ -59,6 +64,10 @@ public sealed class RecoveryRunner
         _executor = executor ?? throw new ArgumentNullException(nameof(executor));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _log = log ?? NullOperationLog.Instance;
+        _hardwareReview = hardwareReview ?? new RetirementHardwareReview(
+            new VolumeLocatorGptLayoutSource(),
+            new BootManagerBcdStoreSource(bootManager),
+            _log);
     }
 
     public async Task<RecoveryRunResult> RunAsync(RecoveryRunRequest request)
@@ -81,10 +90,10 @@ public sealed class RecoveryRunner
             _log.Warn("recovery", $"Could not load retirement state: {exception.Message}");
             if (request.ReviewOnly)
             {
+                var rejected = _hardwareReview.Run(null);
                 return new RecoveryRunResult(
-                    RecoveryRunOutcome.ReviewCompleted,
-                    _executor.DescribeLiveDeleteReview(request.ExecuteDeletion) +
-                    Environment.NewLine + exception.Message);
+                    RecoveryRunOutcome.Failed,
+                    rejected.Describe() + Environment.NewLine + exception.Message);
             }
 
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, exception.Message);
@@ -136,36 +145,11 @@ public sealed class RecoveryRunner
 
     private RecoveryRunResult RunReview(RetirementState? state, bool executeDeletion)
     {
-        var review = _executor.DescribeLiveDeleteReview(executeDeletion);
-        if (state is null || state.IsTerminal)
-        {
-            return new RecoveryRunResult(RecoveryRunOutcome.ReviewCompleted, review);
-        }
-
-        var identification = IdentifyTarget(state);
-        var planText = string.Empty;
-        if (identification.Passed && !identification.AlreadyAbsent &&
-            state.Boot1Identity is not null && identification.ObservedBoot1 is not null)
-        {
-            var plan = _executor.BuildDeletionPlan(
-                state.Boot1Identity,
-                identification.ObservedBoot1,
-                state.Boot2Identity,
-                identification.Report,
-                explicitOptIn: executeDeletion,
-                boot1BcdId: state.Boot1Id);
-            planText = Environment.NewLine + plan.Describe();
-        }
-        else
-        {
-            planText = Environment.NewLine + identification.Describe();
-        }
-
-        _log.Info("recovery", review);
+        _ = executeDeletion;
+        var review = _hardwareReview.Run(state);
         return new RecoveryRunResult(
-            RecoveryRunOutcome.ReviewCompleted,
-            review + planText + Environment.NewLine +
-            "Review mode: no state transition, no diskpart, no BCD change, no restart.");
+            review.OverallPassed ? RecoveryRunOutcome.ReviewCompleted : RecoveryRunOutcome.Failed,
+            review.Describe());
     }
 
     private async Task<RecoveryRunResult> RunCoreAsync(RetirementState state, RecoveryRunRequest request)
@@ -290,6 +274,15 @@ public sealed class RecoveryRunner
         }
 
         state = await ApplyDeletionOrSkipAsync(state, request, identification, deletionPlan);
+
+        if (!_executor.IsBcdRetirementAvailable)
+        {
+            _log.Warn(
+                "recovery",
+                "Phase 2C BCD deletion is SKIPPED. " +
+                $"BcdOperationsImplemented={_executor.IsBcdRetirementAvailable}. " +
+                "DeleteBoot1BcdEntryAsync is not called. No BCD object is removed.");
+        }
 
         await _bootManager.SetNextBootAsync(state.Boot2Id);
 

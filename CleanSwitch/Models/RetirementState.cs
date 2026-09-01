@@ -101,7 +101,9 @@ public sealed class RetirementTransition
 /// </summary>
 public sealed class RetirementState
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
+
+    public const int MinimumReadableSchemaVersion = 1;
 
     public const string RetireBoot1Operation = "RETIRE_BOOT1";
 
@@ -168,7 +170,21 @@ public sealed class RetirementState
     [JsonPropertyOrder(15)]
     public PartitionIdentity? StateVolumeIdentity { get; set; }
 
+    /// <summary>
+    /// Concrete BCD object GUID for Boot 1, recorded on Boot 1 before WinRE.
+    /// Phase 2C deletes only this GUID. Never inferred from a display name.
+    /// </summary>
     [JsonPropertyOrder(16)]
+    public string? Boot1BcdObjectId { get; set; }
+
+    /// <summary>
+    /// Concrete BCD object GUID for Boot 2, recorded on Boot 1 before WinRE.
+    /// Phase 2C must still see this GUID after Boot 1 is removed.
+    /// </summary>
+    [JsonPropertyOrder(17)]
+    public string? Boot2BcdObjectId { get; set; }
+
+    [JsonPropertyOrder(18)]
     public List<RetirementTransition> Transitions { get; set; } = [];
 
     public bool IsTerminal =>

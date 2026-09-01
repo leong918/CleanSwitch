@@ -20,6 +20,15 @@ public sealed class PartitionIdentity
     /// <summary>GPT unique partition GUID from the partition table.</summary>
     public string? GptPartitionId { get; set; }
 
+    /// <summary>GPT unique disk GUID from the disk's partition table. Not a volume letter.</summary>
+    public string? DiskGptUniqueId { get; set; }
+
+    /// <summary>Partition start offset in bytes, from the partition table.</summary>
+    public long? PartitionStartingOffset { get; set; }
+
+    /// <summary>Partition length in bytes, from the partition table.</summary>
+    public long? PartitionSizeBytes { get; set; }
+
     /// <summary>
     /// GPT partition type GUID (EFI System, Basic Data, Microsoft Recovery, ...).
     /// Used to refuse ESP / Recovery / MSR targets. Not a unique identity.
@@ -77,6 +86,21 @@ public sealed class PartitionIdentity
         if (!string.IsNullOrWhiteSpace(GptPartitionId))
         {
             parts.Add($"gptId={GptPartitionId}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(DiskGptUniqueId))
+        {
+            parts.Add($"diskGpt={DiskGptUniqueId}");
+        }
+
+        if (PartitionStartingOffset is not null)
+        {
+            parts.Add($"offset={PartitionStartingOffset}");
+        }
+
+        if (PartitionSizeBytes is not null)
+        {
+            parts.Add($"size={PartitionSizeBytes}");
         }
 
         if (!string.IsNullOrWhiteSpace(GptPartitionType))

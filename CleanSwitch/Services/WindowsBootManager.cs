@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using CleanSwitch.Models;
+using CleanSwitch.Recovery;
 
 namespace CleanSwitch.Services;
 
@@ -23,13 +24,13 @@ public sealed class WindowsBootManager : IBootManager
         var currentOutput = await ReadBcdEditOutputAsync(["/enum", "{current}", "/v"]);
         var loaderOutput = await ReadBcdEditOutputAsync(["/enum", "OSLOADER", "/v"]);
 
-        var currentEntries = ParseEntries(currentOutput);
+        var currentEntries = BcdEditTextParser.Parse(currentOutput);
         var current = currentEntries.FirstOrDefault(IsSwitchableWindows)
-            ?? currentEntries.FirstOrDefault(entry => Guid.TryParse(entry.Identifier, out _))
+            ?? currentEntries.FirstOrDefault(entry => BcdIdentifiers.TryParseObjectId(entry.Identifier, out _))
             ?? throw new BootManagerException(
                 "Could not detect the currently running Windows boot entry from BCDEdit.");
 
-        var loaders = ParseEntries(loaderOutput)
+        var loaders = BcdEditTextParser.Parse(loaderOutput)
             .Where(IsSwitchableWindows)
             .GroupBy(entry => entry.Identifier, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
@@ -97,7 +98,7 @@ public sealed class WindowsBootManager : IBootManager
         }
 
         var output = await ReadBcdEditOutputAsync(["/enum", scope.Trim(), "/v"]);
-        return ParseEntries(output).Select(ToBcdEntry).ToList();
+        return BcdEditTextParser.Parse(output);
     }
 
     public async Task<BcdEntry?> TryGetEntryAsync(string bootGuid)
@@ -112,7 +113,7 @@ public sealed class WindowsBootManager : IBootManager
             return null;
         }
 
-        var entries = ParseEntries(result.StdOut);
+        var entries = BcdEditTextParser.Parse(result.StdOut);
         var match = entries.FirstOrDefault(entry => IdsEqual(entry.Identifier, normalizedGuid))
             ?? entries.FirstOrDefault();
 
@@ -123,7 +124,7 @@ public sealed class WindowsBootManager : IBootManager
             try
             {
                 var fallbackOutput = await ReadBcdEditOutputAsync(["/enum", normalizedGuid, "/v"]);
-                match = ParseEntries(fallbackOutput)
+                match = BcdEditTextParser.Parse(fallbackOutput)
                     .FirstOrDefault(entry => IdsEqual(entry.Identifier, normalizedGuid));
             }
             catch (BootManagerException exception)
@@ -133,7 +134,7 @@ public sealed class WindowsBootManager : IBootManager
             }
         }
 
-        return match is null ? null : ToBcdEntry(match);
+        return match;
     }
 
     public async Task RestartAsync(int delaySeconds)
@@ -158,9 +159,9 @@ public sealed class WindowsBootManager : IBootManager
         _log.Info("restart", $"Restart scheduled in {delaySeconds} second(s).");
     }
 
-    private static ParsedEntry SelectTarget(
-        ParsedEntry current,
-        IReadOnlyList<ParsedEntry> others,
+    private static BcdEntry SelectTarget(
+        BcdEntry current,
+        IReadOnlyList<BcdEntry> others,
         string? preferredOtherGuid)
     {
         if (others.Count == 0)
@@ -208,7 +209,7 @@ public sealed class WindowsBootManager : IBootManager
         foreach (var encoding in new[] { Encoding.Unicode, Encoding.UTF8, Encoding.Default })
         {
             var result = await RunProcessAsync("bcdedit.exe", arguments, encoding);
-            if (result.ExitCode == 0 && ParseEntries(result.StdOut).Count > 0)
+            if (result.ExitCode == 0 && BcdEditTextParser.Parse(result.StdOut).Count > 0)
             {
                 return result.StdOut;
             }
@@ -288,139 +289,24 @@ public sealed class WindowsBootManager : IBootManager
         return result;
     }
 
-    private static List<ParsedEntry> ParseEntries(string output)
+    private static bool IsSwitchableWindows(BcdEntry entry)
     {
-        var entries = new List<ParsedEntry>();
-        ParsedEntry? current = null;
-
-        foreach (var rawLine in output.Split(["\r\n", "\n"], StringSplitOptions.None))
-        {
-            var line = rawLine.Trim();
-            if (line.Length == 0)
-            {
-                continue;
-            }
-
-            if (TryGetProperty(line, "identifier", out var identifier))
-            {
-                if (current is not null)
-                {
-                    entries.Add(current);
-                }
-
-                current = new ParsedEntry
-                {
-                    Identifier = NormalizeIdentifier(identifier)
-                };
-                continue;
-            }
-
-            if (current is null)
-            {
-                continue;
-            }
-
-            if (TryGetProperty(line, "description", out var description))
-            {
-                current.Description = description;
-            }
-            else if (TryGetProperty(line, "path", out var path))
-            {
-                current.Path = path;
-            }
-            else
-            {
-                CaptureExtraProperty(current, line);
-            }
-        }
-
-        if (current is not null)
-        {
-            entries.Add(current);
-        }
-
-        return entries;
-    }
-
-    private static bool TryGetProperty(string line, string name, out string value)
-    {
-        value = string.Empty;
-        if (!line.StartsWith(name, StringComparison.OrdinalIgnoreCase))
+        if (!BcdIdentifiers.TryParseObjectId(entry.Identifier, out _))
         {
             return false;
         }
 
-        var rest = line[name.Length..];
-        if (rest.Length == 0 || !char.IsWhiteSpace(rest[0]))
+        if (entry.IsResumeLoader)
         {
             return false;
         }
 
-        value = rest.Trim();
-        return value.Length > 0;
-    }
-
-    /// <summary>
-    /// Captures the extra fields the recovery-side validators need. Only a whitelist is
-    /// read, so unexpected or wrapped bcdedit lines cannot disturb parsing.
-    /// </summary>
-    private static void CaptureExtraProperty(ParsedEntry entry, string line)
-    {
-        if (TryGetProperty(line, "device", out var device))
-        {
-            entry.Device = device;
-        }
-        else if (TryGetProperty(line, "osdevice", out var osDevice))
-        {
-            entry.OsDevice = osDevice;
-        }
-        else if (TryGetProperty(line, "recoverysequence", out var recoverySequence))
-        {
-            entry.RecoverySequence = NormalizeIdentifier(recoverySequence);
-        }
-        else if (TryGetProperty(line, "type", out var type))
-        {
-            entry.Type = type;
-        }
-    }
-
-    private static BcdEntry ToBcdEntry(ParsedEntry entry) =>
-        new(
-            entry.Identifier,
-            entry.Description.Trim(),
-            entry.Path.Trim(),
-            entry.Device.Trim(),
-            entry.OsDevice.Trim(),
-            entry.RecoverySequence.Trim(),
-            entry.Type.Trim());
-
-    private static bool IsSwitchableWindows(ParsedEntry entry)
-    {
-        if (!Guid.TryParse(entry.Identifier, out _))
-        {
-            return false;
-        }
-
-        if (!string.IsNullOrWhiteSpace(entry.Path) &&
-            entry.Path.Contains("winresume", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (!string.IsNullOrWhiteSpace(entry.Path) &&
-            !entry.Path.Contains("winload", StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(entry.Path) && !entry.IsWindowsLoader)
         {
             return false;
         }
 
         return !ContainsIgnoreCase(entry.Description, "Recovery");
-    }
-
-    private static string NormalizeIdentifier(string identifier)
-    {
-        return Guid.TryParse(identifier.Trim(), out var parsedGuid)
-            ? FormatGuid(parsedGuid)
-            : identifier.Trim();
     }
 
     private static string NormalizeBootGuid(string bootGuid)
@@ -435,7 +321,7 @@ public sealed class WindowsBootManager : IBootManager
         return FormatGuid(parsedGuid);
     }
 
-    private static BootEntry ToBootEntry(ParsedEntry entry)
+    private static BootEntry ToBootEntry(BcdEntry entry)
     {
         var description = string.IsNullOrWhiteSpace(entry.Description)
             ? $"Windows {entry.Identifier}"
@@ -443,7 +329,7 @@ public sealed class WindowsBootManager : IBootManager
         return new BootEntry(entry.Identifier, description);
     }
 
-    private static string FormatEntry(ParsedEntry entry) =>
+    private static string FormatEntry(BcdEntry entry) =>
         $"{(string.IsNullOrWhiteSpace(entry.Description) ? "Windows" : entry.Description)} ({entry.Identifier})";
 
     private static string FormatGuid(Guid guid) => $"{{{guid:D}}}";
@@ -464,23 +350,6 @@ public sealed class WindowsBootManager : IBootManager
 
     private static string FormatForLog(string value) =>
         string.IsNullOrWhiteSpace(value) ? "<empty>" : value.Trim();
-
-    private sealed class ParsedEntry
-    {
-        public string Identifier { get; set; } = string.Empty;
-
-        public string Description { get; set; } = string.Empty;
-
-        public string Path { get; set; } = string.Empty;
-
-        public string Device { get; set; } = string.Empty;
-
-        public string OsDevice { get; set; } = string.Empty;
-
-        public string RecoverySequence { get; set; } = string.Empty;
-
-        public string Type { get; set; } = string.Empty;
-    }
 
     private sealed record ProcessResult(int ExitCode, string StdOut, string StdErr);
 }

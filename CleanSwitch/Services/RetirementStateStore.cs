@@ -508,11 +508,13 @@ public sealed class RetirementStateStore
 
     private RetirementState Validate(RetirementState state, string path)
     {
-        if (state.SchemaVersion != RetirementState.CurrentSchemaVersion)
+        if (state.SchemaVersion < RetirementState.MinimumReadableSchemaVersion ||
+            state.SchemaVersion > RetirementState.CurrentSchemaVersion)
         {
             throw new RetirementStorageException(
                 $"The retirement state file '{path}' has schemaVersion {state.SchemaVersion}, " +
-                $"but this build understands version {RetirementState.CurrentSchemaVersion}. " +
+                $"but this build reads versions {RetirementState.MinimumReadableSchemaVersion}-" +
+                $"{RetirementState.CurrentSchemaVersion}. " +
                 "Refusing to act on a state file it may misinterpret.");
         }
 
@@ -591,14 +593,16 @@ public sealed class RetirementStateStore
                     continue;
                 }
 
-                if (parsed.SchemaVersion != RetirementState.CurrentSchemaVersion ||
+                if (parsed.SchemaVersion < RetirementState.MinimumReadableSchemaVersion ||
+                    parsed.SchemaVersion > RetirementState.CurrentSchemaVersion ||
                     !string.Equals(parsed.Operation, RetirementState.RetireBoot1Operation, StringComparison.Ordinal))
                 {
                     _log.Warn(
                         "state-store",
                         $"Volume scan ignored '{candidatePath}': operation='{parsed.Operation}' " +
                         $"schemaVersion={parsed.SchemaVersion}; expected " +
-                        $"'{RetirementState.RetireBoot1Operation}' and " +
+                        $"'{RetirementState.RetireBoot1Operation}' and schema " +
+                        $"{RetirementState.MinimumReadableSchemaVersion}-" +
                         $"{RetirementState.CurrentSchemaVersion}.");
                     continue;
                 }
