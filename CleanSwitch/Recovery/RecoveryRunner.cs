@@ -76,6 +76,16 @@ public sealed class RecoveryRunner
         _layout = layout ?? new VolumeLocatorGptLayoutSource();
     }
 
+    public Task<RetirementResumePreviewResult> RunResumePreviewAsync(RetirementState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        _log.Info(
+            "resume-preview",
+            "Starting read-only BOOT1_RETIRED resume preview. No disk, BCD delete, state write, or reboot.");
+        var preview = new RetirementResumePreview(_diskValidator, _bcdStore, _log);
+        return preview.RunAsync(state);
+    }
+
     public async Task<RecoveryRunResult> RunAsync(RecoveryRunRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);

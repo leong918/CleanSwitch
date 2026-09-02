@@ -11,6 +11,7 @@ internal static class Program
     private const string RecoveryRunSwitch = "--recovery-run";
     private const string RecoveryDryRunSwitch = "--recovery-dry-run";
     private const string RecoveryReviewSwitch = "--recovery-review";
+    private const string RecoveryResumePreviewSwitch = "--recovery-resume-preview";
     private const string HardwareReviewSwitch = "--retirement-hardware-review";
     private const string ExecuteDeletionSwitch = "--execute-deletion";
     private const string ListVolumesSwitch = "--list-volumes";
@@ -28,6 +29,11 @@ internal static class Program
         if (HasSwitch(args, ListVolumesSwitch))
         {
             return ListVolumes();
+        }
+
+        if (HasSwitch(args, RecoveryResumePreviewSwitch))
+        {
+            return RunRecoveryResumePreview();
         }
 
         if (HasSwitch(args, RetirementAbandonCommand.Switch))
@@ -87,11 +93,52 @@ internal static class Program
     }
 
     /// <summary>
+    /// Read-only preview of resuming from BOOT1_RETIRED. Never runs diskpart, bcdedit /delete,
+    /// state persistence, or reboot.
+    /// </summary>
+    private static int RunRecoveryResumePreview()
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+
+        try
+        {
+            var options = AppConfiguration.Load();
+            // Read-only preview may load state from the running Boot 2 volume during operator
+            // verification. No state file is written in this code path.
+            options.AllowStateOnSystemVolume = true;
+            var services = RetirementServices.Create(options, "resume-preview");
+
+            Report($"Retirement state file: {services.Coordinator.StateFilePath}");
+            Report($"Log destinations: {string.Join("; ", services.Log.Destinations)}");
+
+            var state = services.Coordinator.TryLoad();
+            if (state is null)
+            {
+                Report("ResumePreviewFailed: No retirement state file was found. State modified: False");
+                return PauseIfOwned(ownsConsole, 1);
+            }
+
+            var preview = services.RecoveryRunner.RunResumePreviewAsync(state).GetAwaiter().GetResult();
+            Report(preview.Describe());
+
+            return PauseIfOwned(ownsConsole, preview.Readiness == "PASS" ? 0 : 1);
+        }
+        catch (Exception exception) when (
+            exception is RetirementStorageException or InvalidOperationException or BootManagerException)
+        {
+            Report("CleanSwitch could not run the resume preview. State modified: False");
+            Report(exception.Message);
+            return PauseIfOwned(ownsConsole, 2);
+        }
+    }
+
+    /// <summary>
     /// Headless entry point for the recovery environment:
     /// <c>--recovery-run</c> validates and hands off to Boot 2.
     /// <c>--recovery-dry-run</c> validates and prints the deletion plan.
     /// <c>--recovery-review</c> / <c>--retirement-hardware-review</c> print a read-only
     /// Phase 2B + 2C hardware review. No disk or BCD command is constructed or started.
+    /// <c>--recovery-resume-preview</c> previews BOOT1_RETIRED resume with survivor reconciliation.
     /// <c>--execute-deletion</c> is the runtime opt-in; it does nothing while live delete is disabled.
     /// </summary>
     private static int RunRecoverySide(RecoveryRunRequest request)
