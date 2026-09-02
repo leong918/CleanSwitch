@@ -37,6 +37,10 @@ public sealed class BcdEntryIdentity
 
     public string OsDevice { get; init; } = string.Empty;
 
+    public string RecoverySequence { get; init; } = string.Empty;
+
+    public string ResumeObject { get; init; } = string.Empty;
+
     public string Type { get; init; } = string.Empty;
 
     public BcdObjectKind Kind { get; init; }
@@ -61,6 +65,8 @@ public sealed class BcdEntryIdentity
             Path = entry.Path,
             Device = entry.Device,
             OsDevice = entry.OsDevice,
+            RecoverySequence = entry.RecoverySequence,
+            ResumeObject = entry.ResumeObject,
             Type = entry.Type,
             Kind = Classify(entry, objectId),
             IdentifierWasAlias = wasAlias

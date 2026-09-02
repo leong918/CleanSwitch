@@ -10,6 +10,7 @@ public sealed record BcdEntry(
     string Device,
     string OsDevice,
     string RecoverySequence,
+    string ResumeObject,
     string Type)
 {
     public bool IsWindowsLoader =>

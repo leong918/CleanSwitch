@@ -168,7 +168,7 @@ public sealed class DestructiveBcdRetirementEngineTests
         Assert.Contains("boot2", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
+    [SafeBuildFact]
     public async Task Production_executor_does_not_call_bcd_command()
     {
         var command = new FakeDestructiveBcdCommand();

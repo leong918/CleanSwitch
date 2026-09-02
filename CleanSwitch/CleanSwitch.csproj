@@ -14,5 +14,13 @@
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="appsettings.LiveTest.json">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
+  <Target Name="CopyLiveTestAppSettings" AfterTargets="Publish" Condition="'$(CleanSwitchLiveTestBuild)' == 'true'">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\appsettings.LiveTest.json"
+          DestinationFiles="$(PublishDir)appsettings.json"
+          SkipUnchangedFiles="false" />
+  </Target>
 </Project>

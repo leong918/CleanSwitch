@@ -34,15 +34,11 @@ public sealed class RetirementNotImplementedException : Exception
 /// </summary>
 public sealed class RetirementExecutor
 {
-    /// <summary>
-    /// Hard switch for live deletion. Stays false until a later, deliberate review flips it.
-    /// </summary>
-    private static readonly bool DestructiveOperationsImplemented = false;
+    private static readonly bool DestructiveOperationsImplemented =
+        ProductionRetirementGates.DestructiveOperationsImplemented;
 
-    /// <summary>
-    /// Hard switch for Phase 2C BCD deletion. Stays false until a later, deliberate review.
-    /// </summary>
-    private static readonly bool BcdOperationsImplemented = false;
+    private static readonly bool BcdOperationsImplemented =
+        ProductionRetirementGates.BcdOperationsImplemented;
 
     private readonly CleanSwitchOptions _options;
     private readonly IOperationLog _log;

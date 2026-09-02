@@ -44,6 +44,8 @@ public sealed class RecoveryRunner
     private readonly BootEntryValidator _bootEntryValidator;
     private readonly RetirementExecutor _executor;
     private readonly RetirementHardwareReview _hardwareReview;
+    private readonly IBcdStoreSource _bcdStore;
+    private readonly IGptLayoutSource _layout;
     private readonly CleanSwitchOptions _options;
     private readonly IOperationLog _log;
 
@@ -55,7 +57,9 @@ public sealed class RecoveryRunner
         RetirementExecutor executor,
         CleanSwitchOptions options,
         IOperationLog? log = null,
-        RetirementHardwareReview? hardwareReview = null)
+        RetirementHardwareReview? hardwareReview = null,
+        IBcdStoreSource? bcdStore = null,
+        IGptLayoutSource? layout = null)
     {
         _bootManager = bootManager ?? throw new ArgumentNullException(nameof(bootManager));
         _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
@@ -65,9 +69,11 @@ public sealed class RecoveryRunner
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _log = log ?? NullOperationLog.Instance;
         _hardwareReview = hardwareReview ?? new RetirementHardwareReview(
-            new VolumeLocatorGptLayoutSource(),
-            new BootManagerBcdStoreSource(bootManager),
+            layout ?? new VolumeLocatorGptLayoutSource(),
+            bcdStore ?? new BootManagerBcdStoreSource(bootManager),
             _log);
+        _bcdStore = bcdStore ?? new BootManagerBcdStoreSource(bootManager);
+        _layout = layout ?? new VolumeLocatorGptLayoutSource();
     }
 
     public async Task<RecoveryRunResult> RunAsync(RecoveryRunRequest request)
@@ -154,6 +160,21 @@ public sealed class RecoveryRunner
 
     private async Task<RecoveryRunResult> RunCoreAsync(RetirementState state, RecoveryRunRequest request)
     {
+        if (ShouldUseProductionExecution(request, state))
+        {
+            var production = new ProductionRetirementExecution(
+                _bootManager,
+                _coordinator,
+                _diskValidator,
+                _executor,
+                _hardwareReview,
+                _bcdStore,
+                _layout,
+                _options,
+                _log);
+            return await production.RunAsync(state, request);
+        }
+
         if (state.Status is RetirementStatus.Pending or RetirementStatus.Failed)
         {
             state = _coordinator.Transition(
@@ -396,6 +417,12 @@ public sealed class RecoveryRunner
         state.Status is RetirementStatus.Boot1Retired
             or RetirementStatus.BcdUpdated
             or RetirementStatus.Verified;
+
+    private bool ShouldUseProductionExecution(RecoveryRunRequest request, RetirementState state) =>
+        !request.ReviewOnly &&
+        _executor.IsDestructiveRetirementAvailable &&
+        _executor.IsConfigEnabled &&
+        (request.ExecuteDeletion || IsDeletionAlreadySettled(state));
 
     private TargetIdentification IdentifyBoot2Only(RetirementState state)
     {

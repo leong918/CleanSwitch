@@ -41,6 +41,8 @@ public interface IRetirementCoordinator
 
     RetirementState MarkAborted(RetirementState state, string reason);
 
+    RetirementState Persist(RetirementState state);
+
     /// <summary>
     /// Called on startup: if a VERIFIED handoff exists and the running boot entry is the
     /// recorded Boot 2, the operation is closed out as COMPLETE.

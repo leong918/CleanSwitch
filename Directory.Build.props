@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <!-- Default safe: live destructive gates compile false unless explicitly enabled. -->
+    <CleanSwitchLiveTestBuild Condition="'$(CleanSwitchLiveTestBuild)' == ''">false</CleanSwitchLiveTestBuild>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(CleanSwitchLiveTestBuild)' == 'true'">
+    <DefineConstants>$(DefineConstants);CLEANSWITCH_LIVE_TEST_BUILD</DefineConstants>
+  </PropertyGroup>
+</Project>

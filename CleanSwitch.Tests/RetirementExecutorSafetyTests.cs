@@ -1,11 +1,12 @@
 using CleanSwitch.Recovery;
 using CleanSwitch.Tests.Support;
+using Xunit;
 
 namespace CleanSwitch.Tests;
 
 public sealed class RetirementExecutorSafetyTests
 {
-    [Fact]
+    [SafeBuildFact]
     public void Production_flags_stay_disabled()
     {
         var executor = new RetirementExecutor(
@@ -29,7 +30,7 @@ public sealed class RetirementExecutorSafetyTests
         Assert.DoesNotContain("\"EnableDestructiveRetirement\": true", json, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [SafeBuildFact]
     public async Task RetireBoot1Async_never_calls_command_while_implemented_flag_is_false()
     {
         var command = new FakeDestructiveDiskCommand();
@@ -52,7 +53,7 @@ public sealed class RetirementExecutorSafetyTests
         Assert.Null(command.LastTarget);
     }
 
-    [Fact]
+    [SafeBuildFact]
     public void BuildDeletionPlan_is_non_destructive_even_when_opt_in_is_set()
     {
         var command = new FakeDestructiveDiskCommand();

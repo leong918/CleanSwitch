@@ -51,5 +51,7 @@ internal sealed class FakeRetirementCoordinator : IRetirementCoordinator
     public RetirementState MarkAborted(RetirementState state, string reason) =>
         throw new NotSupportedException();
 
+    public RetirementState Persist(RetirementState state) => state;
+
     public RetirementState? TryCompleteAfterReboot(string currentBootGuid) => null;
 }

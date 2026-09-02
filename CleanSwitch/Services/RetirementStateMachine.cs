@@ -24,6 +24,17 @@ public static class RetirementStateMachine
     ];
 
     /// <summary>
+    /// Production live execution may capture survivors and delete from RECOVERY_STARTED.
+    /// </summary>
+    private static readonly (RetirementStatus From, RetirementStatus To, string Why)[] ProductionSkipEdges =
+    [
+        (RetirementStatus.RecoveryStarted, RetirementStatus.Phase2BReady,
+            "Production execution captures survivors after pre-delete review."),
+        (RetirementStatus.Phase2BReady, RetirementStatus.Boot1Retired,
+            "Phase 2B partition delete completed and verified.")
+    ];
+
+    /// <summary>
     /// Phase 2B-identify still skips deletion. TARGET_VALIDATED is required.
     /// BOOT1_RETIRED is skipped because deletion is not implemented.
     /// </summary>
@@ -72,6 +83,11 @@ public static class RetirementStateMachine
         }
 
         foreach (var edge in Phase2ASkipEdges)
+        {
+            table[edge.From].Add(edge.To);
+        }
+
+        foreach (var edge in ProductionSkipEdges)
         {
             table[edge.From].Add(edge.To);
         }

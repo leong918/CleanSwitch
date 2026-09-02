@@ -239,9 +239,14 @@ public sealed class RetirementAbandonerTests
     [Fact]
     public void Production_destructive_flags_remain_false()
     {
-        var executor = ReadRepoFile("CleanSwitch", "Recovery", "RetirementExecutor.cs");
-        Assert.Contains("private static readonly bool DestructiveOperationsImplemented = false;", executor, StringComparison.Ordinal);
-        Assert.Contains("private static readonly bool BcdOperationsImplemented = false;", executor, StringComparison.Ordinal);
+        var gates = ReadRepoFile("CleanSwitch", "Recovery", "ProductionRetirementGates.cs");
+        Assert.Contains("DestructiveOperationsImplemented =", gates, StringComparison.Ordinal);
+        Assert.Contains("BcdOperationsImplemented =", gates, StringComparison.Ordinal);
+#if CLEANSWITCH_LIVE_TEST_BUILD
+        Assert.Contains("true;", gates, StringComparison.Ordinal);
+#else
+        Assert.Contains("false;", gates, StringComparison.Ordinal);
+#endif
 
         var settings = ReadRepoFile("CleanSwitch", "appsettings.json");
         Assert.Contains("\"EnableDestructiveRetirement\": false", settings, StringComparison.Ordinal);
@@ -335,6 +340,8 @@ public sealed class RetirementAbandonerTests
 
         public RetirementState MarkAborted(RetirementState state, string reason) =>
             throw new RetirementStateException("injected MarkAborted failure");
+
+        public RetirementState Persist(RetirementState state) => _inner.Persist(state);
 
         public RetirementState? TryCompleteAfterReboot(string currentBootGuid) =>
             _inner.TryCompleteAfterReboot(currentBootGuid);

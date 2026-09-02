@@ -103,6 +103,10 @@ public static class BcdEditTextParser
         {
             entry.RecoverySequence = NormalizeIdentifier(recoverySequence);
         }
+        else if (TryGetProperty(line, "resumeobject", out var resumeObject))
+        {
+            entry.ResumeObject = NormalizeIdentifier(resumeObject);
+        }
         else if (TryGetProperty(line, "type", out var type))
         {
             entry.Type = type;
@@ -117,6 +121,7 @@ public static class BcdEditTextParser
             entry.Device.Trim(),
             entry.OsDevice.Trim(),
             entry.RecoverySequence.Trim(),
+            entry.ResumeObject.Trim(),
             entry.Type.Trim());
 
     private sealed class ParsedEntry
@@ -132,6 +137,8 @@ public static class BcdEditTextParser
         public string OsDevice { get; set; } = string.Empty;
 
         public string RecoverySequence { get; set; } = string.Empty;
+
+        public string ResumeObject { get; set; } = string.Empty;
 
         public string Type { get; set; } = string.Empty;
     }

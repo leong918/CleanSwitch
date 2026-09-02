@@ -235,6 +235,17 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
             return state;
         }
 
+        if (state.DestructiveDeletionPerformed &&
+            state.Status is RetirementStatus.Boot1Retired or RetirementStatus.Phase2BReady)
+        {
+            _log.Warn(
+                "coordinator",
+                $"Recording a non-terminal failure without changing {RetirementStatusNames.ToWire(state.Status)}: {error}");
+            state.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            _store.Save(state);
+            return state;
+        }
+
         if (!RetirementStateMachine.IsLegal(state.Status, RetirementStatus.Failed))
         {
             _log.Warn(
@@ -248,8 +259,16 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
         return Transition(state, RetirementStatus.Failed, error);
     }
 
-    public RetirementState MarkAborted(RetirementState state, string reason) =>
+    public     RetirementState MarkAborted(RetirementState state, string reason) =>
         Transition(state, RetirementStatus.Aborted, reason);
+
+    public RetirementState Persist(RetirementState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        state.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        _store.Save(state);
+        return state;
+    }
 
     public RetirementState? TryCompleteAfterReboot(string currentBootGuid)
     {

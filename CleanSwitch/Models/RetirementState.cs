@@ -14,6 +14,7 @@ public enum RetirementStatus
     RecoveryStarted,
     TargetValidated,
     Boot2Validated,
+    Phase2BReady,
     Boot1Retired,
     BcdUpdated,
     Verified,
@@ -30,6 +31,7 @@ public static class RetirementStatusNames
         (RetirementStatus.RecoveryStarted, "RECOVERY_STARTED"),
         (RetirementStatus.TargetValidated, "TARGET_VALIDATED"),
         (RetirementStatus.Boot2Validated, "BOOT2_VALIDATED"),
+        (RetirementStatus.Phase2BReady, "PHASE_2B_READY"),
         (RetirementStatus.Boot1Retired, "BOOT1_RETIRED"),
         (RetirementStatus.BcdUpdated, "BCD_UPDATED"),
         (RetirementStatus.Verified, "VERIFIED"),
@@ -142,22 +144,28 @@ public sealed class RetirementState
     [JsonPropertyOrder(9)]
     public bool DestructiveDeletionPerformed { get; set; }
 
+    /// <summary>
+    /// Phase 2C sets this after a successful <c>bcdedit /delete</c> and post-delete verify.
+    /// </summary>
     [JsonPropertyOrder(10)]
-    public string MachineName { get; set; } = string.Empty;
+    public bool BcdDeletionPerformed { get; set; }
 
     [JsonPropertyOrder(11)]
+    public string MachineName { get; set; } = string.Empty;
+
+    [JsonPropertyOrder(12)]
     public string? LastError { get; set; }
 
     /// <summary>Stable identifiers for Boot 1, recorded on Boot 1 at PENDING time.</summary>
-    [JsonPropertyOrder(12)]
+    [JsonPropertyOrder(13)]
     public PartitionIdentity? Boot1Identity { get; set; }
 
     /// <summary>Stable identifiers for Boot 2, recorded on Boot 1 at PENDING time.</summary>
-    [JsonPropertyOrder(13)]
+    [JsonPropertyOrder(14)]
     public PartitionIdentity? Boot2Identity { get; set; }
 
     /// <summary>Boot 1 identity as observed in recovery by GPT GUID lookup. Audit only.</summary>
-    [JsonPropertyOrder(14)]
+    [JsonPropertyOrder(15)]
     public PartitionIdentity? Boot1IdentityObserved { get; set; }
 
     /// <summary>
@@ -167,24 +175,45 @@ public sealed class RetirementState
     /// to be sure the two are the same volume: drive letters and Win32 volume GUIDs are
     /// both reassigned per Windows instance.
     /// </summary>
-    [JsonPropertyOrder(15)]
+    [JsonPropertyOrder(16)]
     public PartitionIdentity? StateVolumeIdentity { get; set; }
 
     /// <summary>
     /// Concrete BCD object GUID for Boot 1, recorded on Boot 1 before WinRE.
     /// Phase 2C deletes only this GUID. Never inferred from a display name.
     /// </summary>
-    [JsonPropertyOrder(16)]
+    [JsonPropertyOrder(17)]
     public string? Boot1BcdObjectId { get; set; }
 
     /// <summary>
     /// Concrete BCD object GUID for Boot 2, recorded on Boot 1 before WinRE.
     /// Phase 2C must still see this GUID after Boot 1 is removed.
     /// </summary>
-    [JsonPropertyOrder(17)]
+    [JsonPropertyOrder(18)]
     public string? Boot2BcdObjectId { get; set; }
 
-    [JsonPropertyOrder(18)]
+    /// <summary>
+    /// Non-target GPT partitions captured before Phase 2B delete. Used to verify no unrelated
+    /// partition disappeared.
+    /// </summary>
+    [JsonPropertyOrder(19)]
+    public List<GptPartitionSnapshot>? SurvivorGptSnapshot { get; set; }
+
+    /// <summary>
+    /// Concrete BCD object GUIDs present before any delete. Post-2B reconciliation excludes the
+    /// retired Boot 1 dependency graph from required survivors.
+    /// </summary>
+    [JsonPropertyOrder(20)]
+    public List<string>? SurvivorBcdObjectIds { get; set; }
+
+    /// <summary>
+    /// Boot-1-exclusive BCD object GUIDs captured before Phase 2B delete. These may disappear
+    /// when the Boot 1 partition is removed and are excluded from post-2B survivor checks.
+    /// </summary>
+    [JsonPropertyOrder(21)]
+    public List<string>? Boot1ExclusiveBcdObjectIds { get; set; }
+
+    [JsonPropertyOrder(22)]
     public List<RetirementTransition> Transitions { get; set; } = [];
 
     public bool IsTerminal =>
