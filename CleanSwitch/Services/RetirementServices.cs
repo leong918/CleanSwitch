@@ -77,7 +77,17 @@ public sealed class RetirementServices
         var coordinator = new RetirementCoordinator(store, log);
         var diskValidator = new DiskValidator(log);
         var bootEntryValidator = new BootEntryValidator(bootManager, log);
-        var executor = new RetirementExecutor(options, log);
+        var layout = new VolumeLocatorGptLayoutSource();
+        var bcdStore = new BootManagerBcdStoreSource(bootManager);
+        var executor = new RetirementExecutor(
+            options,
+            log,
+            layout,
+            new DiskpartDestructiveDiskCommand(log),
+            bcdStore,
+            new BcdeditDestructiveBcdCommand(log),
+            bootManager);
+        var hardwareReview = new RetirementHardwareReview(layout, bcdStore, log);
         var recoveryRunner = new RecoveryRunner(
             bootManager,
             coordinator,
@@ -85,7 +95,8 @@ public sealed class RetirementServices
             bootEntryValidator,
             executor,
             options,
-            log);
+            log,
+            hardwareReview);
 
         return new RetirementServices(
             options,

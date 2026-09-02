@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using CleanSwitch.Models;
 using CleanSwitch.Services;
 
@@ -19,9 +19,10 @@ public sealed class RetirementNotImplementedException : Exception
 /// <summary>
 /// The only place that may remove Boot 1.
 /// <para>
-/// Live <c>diskpart</c> exists in this class but is unreachable until every guard is true.
-/// This build keeps <see cref="DestructiveOperationsImplemented"/> false, so
-/// <see cref="RetireBoot1Async"/> throws before writing a script or starting a process.
+/// Live deletion is compiled in <see cref="DestructiveRetirementEngine"/> but is
+/// unreachable until every guard is true. This build keeps
+/// <see cref="DestructiveOperationsImplemented"/> false, so
+/// <see cref="RetireBoot1Async"/> throws before the engine starts a disk command.
 /// </para>
 /// Guards, all required:
 ///   1. <see cref="DestructiveOperationsImplemented"/> (hard-coded; false in this build)
@@ -38,16 +39,46 @@ public sealed class RetirementExecutor
     /// </summary>
     private static readonly bool DestructiveOperationsImplemented = false;
 
+    /// <summary>
+    /// Hard switch for Phase 2C BCD deletion. Stays false until a later, deliberate review.
+    /// </summary>
+    private static readonly bool BcdOperationsImplemented = false;
+
     private readonly CleanSwitchOptions _options;
     private readonly IOperationLog _log;
+    private readonly IGptLayoutSource _layout;
+    private readonly DestructiveRetirementEngine _engine;
+    private readonly DestructiveBcdRetirementEngine _bcdEngine;
 
-    public RetirementExecutor(CleanSwitchOptions options, IOperationLog? log = null)
+    public RetirementExecutor(
+        CleanSwitchOptions options,
+        IOperationLog? log = null,
+        IGptLayoutSource? layout = null,
+        IDestructiveDiskCommand? diskCommand = null,
+        IBcdStoreSource? bcdStore = null,
+        IDestructiveBcdCommand? bcdCommand = null,
+        IBootManager? bootManager = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _log = log ?? NullOperationLog.Instance;
+        _layout = layout ?? new VolumeLocatorGptLayoutSource();
+        _engine = new DestructiveRetirementEngine(
+            _options,
+            _layout,
+            diskCommand ?? new DiskpartDestructiveDiskCommand(_log),
+            _log,
+            DestructiveOperationsImplemented,
+            PinnedRetirementIdentitySet.Instance);
+        _bcdEngine = new DestructiveBcdRetirementEngine(
+            bcdStore ?? new BootManagerBcdStoreSource(bootManager ?? new WindowsBootManager(_log)),
+            bcdCommand ?? new BcdeditDestructiveBcdCommand(_log),
+            _log,
+            BcdOperationsImplemented);
     }
 
     public bool IsDestructiveRetirementAvailable => DestructiveOperationsImplemented;
+
+    public bool IsBcdRetirementAvailable => BcdOperationsImplemented;
 
     public bool IsConfigEnabled => _options.EnableDestructiveRetirement;
 
@@ -107,24 +138,28 @@ public sealed class RetirementExecutor
                 boot2?.GptPartitionId);
         }
 
-        var live = VolumeLocator.TryFindUniqueByGptId(gptId, out var locateError);
-        if (live is null)
+        var liveMatches = _layout.Capture().WithGptId(gptId);
+        if (liveMatches.Count == 0)
         {
             return Incomplete(
-                locateError ?? "Boot 1 GPT unique id was not found as a unique volume in this environment.",
+                "Boot 1 GPT unique id was not found as a unique partition in the live GPT layout.",
                 guards,
                 boot1BcdId,
                 boot2?.GptPartitionId);
         }
 
-        if (live.DiskNumber is not int disk || live.PartitionNumber is not int partition)
+        if (liveMatches.Count != 1)
         {
             return Incomplete(
-                $"Live volume for {observedBoot1.GptPartitionId} has no disk/partition number.",
+                $"Boot 1 GPT unique id matched {liveMatches.Count} partitions. Refusing to choose.",
                 guards,
                 boot1BcdId,
                 boot2?.GptPartitionId);
         }
+
+        var live = liveMatches[0];
+        var disk = live.DiskNumber;
+        var partition = live.PartitionNumber;
 
         if (disk != observedBoot1.DiskNumber || partition != observedBoot1.PartitionNumber)
         {
@@ -157,7 +192,7 @@ public sealed class RetirementExecutor
         }
 
         GptPartitionTypes.TryParse(
-            live.GptPartitionType is null ? observedBoot1.GptPartitionType : VolumeLocator.FormatGptId(live.GptPartitionType.Value),
+            live.PartitionType is null ? observedBoot1.GptPartitionType : VolumeLocator.FormatGptId(live.PartitionType.Value),
             out var liveType);
 
         if (liveType == GptPartitionTypes.EfiSystem ||
@@ -196,10 +231,10 @@ public sealed class RetirementExecutor
                 boot2.GptPartitionId);
         }
 
-        var gpt = live.GptPartitionId ?? observedBoot1.GptPartitionId;
-        var type = live.GptPartitionType is null
+        var gpt = VolumeLocator.FormatGptId(live.PartitionGptId);
+        var type = live.PartitionType is null
             ? observedBoot1.GptPartitionType
-            : VolumeLocator.FormatGptId(live.GptPartitionType.Value);
+            : VolumeLocator.FormatGptId(live.PartitionType.Value);
 
         var script = BuildDiskpartScript(disk, partition);
         var plan = new RetirementDeletionPlan
@@ -214,8 +249,8 @@ public sealed class RetirementExecutor
             GptPartitionId = gpt,
             GptPartitionType = type,
             Size = LocatedVolume.FormatSize(live.SizeBytes),
-            FileSystem = live.FileSystem,
-            ObservedMount = live.PrimaryMountPoint ?? observedBoot1.ObservedDriveLetter,
+            FileSystem = null,
+            ObservedMount = live.MountPoint ?? observedBoot1.ObservedDriveLetter,
             Boot1BcdId = boot1BcdId,
             Boot2GptPartitionId = boot2?.GptPartitionId,
             DiskpartScript = script,
@@ -226,7 +261,7 @@ public sealed class RetirementExecutor
                 {
                     Name = "re-observe",
                     Description =
-                        $"Look up GPT unique id {gpt} with VolumeLocator (read-only). Require exactly one match " +
+                        $"Look up GPT unique id {gpt} from the live GPT layout (read-only). Require exactly one match " +
                         $"on disk {disk} partition {partition}.",
                     IsDestructive = false
                 },
@@ -262,8 +297,9 @@ public sealed class RetirementExecutor
 
     /// <summary>
     /// Live deletion. Unreachable in this build: guard 1 is false, so this throws before
-    /// any script is written. When a later change flips that flag, this method re-resolves
-    /// by GPT, re-checks every pin, then runs diskpart against disk 0 partition 3 only.
+    /// the engine is reached. When a later change flips that flag, the engine re-enumerates
+    /// GPT, re-resolves Boot 1 by unique id, re-checks every guard, then invokes the
+    /// injected disk command.
     /// </summary>
     public async Task<RetirementExecutionResult> RetireBoot1Async(
         PartitionIdentity expectedBoot1,
@@ -322,14 +358,7 @@ public sealed class RetirementExecutor
                 Environment.NewLine + plan.Describe());
         }
 
-        if (!plan.TargetIdentified || plan.DiskNumber is not int disk || plan.PartitionNumber is not int partition)
-        {
-            throw new RetirementExecutionException(
-                "Refusing to retire Boot 1: the deletion plan did not name a unique target." +
-                Environment.NewLine + plan.Describe());
-        }
-
-        return await ExecutePinnedDeletionAsync(disk, partition, expectedBoot1, boot2, plan);
+        return await _engine.ExecuteAsync(expectedBoot1, boot2, validation, explicitOptIn);
     }
 
     /// <summary>
@@ -404,10 +433,10 @@ public sealed class RetirementExecutor
     /// <summary>Read-only presence of the pinned Boot 1 / Boot 2 GPT ids.</summary>
     public PinnedVolumeSnapshot ReadPinnedSnapshot()
     {
-        var located = VolumeLocator.Enumerate();
-        var boot1 = located.WithGptPartitionId(PinnedRetirementTargets.Boot1GptId);
-        var boot2 = located.WithGptPartitionId(PinnedRetirementTargets.Boot2GptId);
-        return new PinnedVolumeSnapshot(boot1.Count, boot2.Count, boot1.FirstOrDefault(), boot2.FirstOrDefault());
+        var live = _layout.Capture();
+        var boot1 = live.WithGptId(PinnedRetirementTargets.Boot1GptId);
+        var boot2 = live.WithGptId(PinnedRetirementTargets.Boot2GptId);
+        return new PinnedVolumeSnapshot(boot1.Count, boot2.Count, null, null);
     }
 
     public string DescribeLiveDeleteReview(bool executeDeletionSwitch)
@@ -415,7 +444,8 @@ public sealed class RetirementExecutor
         var text = new StringBuilder();
         text.AppendLine("======== LIVE-DELETE REVIEW (NO DISK COMMAND EXECUTED) ========");
         text.AppendLine("Code path: RecoveryRunner -> RetirementExecutor.RetireBoot1Async");
-        text.AppendLine("           -> ExecutePinnedDeletionAsync -> LoggedProcess diskpart.exe /s");
+        text.AppendLine("           -> DestructiveRetirementEngine -> IDestructiveDiskCommand");
+        text.AppendLine("           -> DiskpartDestructiveDiskCommand (production) / fake (tests)");
         text.AppendLine();
         text.AppendLine("Exact command (only after every guard passes):");
         text.AppendLine("  diskpart.exe /s <WinRE temp>\\cleanswitch-retire-boot1.txt");
@@ -433,7 +463,7 @@ public sealed class RetirementExecutor
         text.AppendLine($"  MSR  disk {PinnedRetirementTargets.MsrDisk} partition {PinnedRetirementTargets.MsrPartition}");
         text.AppendLine($"  Boot 1 WinRE disk {PinnedRetirementTargets.Boot1WinReDisk} partition {PinnedRetirementTargets.Boot1WinRePartition} {PinnedRetirementTargets.Boot1WinReGpt}");
         text.AppendLine($"  Boot 2 WinRE disk {PinnedRetirementTargets.Boot2WinReDisk} partition {PinnedRetirementTargets.Boot2WinRePartition} {PinnedRetirementTargets.Boot2WinReGpt}");
-        text.AppendLine("  Boot 1 BCD loader — not deleted (Phase 2C)");
+        text.AppendLine("  Boot 1 BCD loader - Phase 2C compiled, BcdOperationsImplemented=false, not deleted");
         text.AppendLine("  Boot 2 is not moved or extended. Freed space stays unallocated.");
         text.AppendLine();
         text.AppendLine("Guards required to reach diskpart (every line must be true):");
@@ -466,218 +496,31 @@ public sealed class RetirementExecutor
     }
 
     /// <summary>
-    /// NOT IMPLEMENTED. Phase 2C would remove the Boot 1 loader object from the BCD store
-    /// after the partition has gone. Always throws.
+    /// Phase 2C BCD delete. Unreachable in this build: <see cref="BcdOperationsImplemented"/>
+    /// is false, so this throws before bcdedit starts.
     /// </summary>
-    public Task DeleteBoot1BcdEntryAsync(string boot1Guid, bool explicitOptIn)
+    public async Task<RetirementExecutionResult> DeleteBoot1BcdEntryAsync(
+        RetirementState state,
+        ValidationReport validation,
+        bool explicitOptIn)
     {
-        _log.Warn(
-            "executor",
-            $"DeleteBoot1BcdEntryAsync was called for {boot1Guid} (explicitOptIn={explicitOptIn}). " +
-            "Phase 2C is NOT IMPLEMENTED; refused. No BCD object was deleted.");
-
-        throw new RetirementNotImplementedException(
-            "NOT IMPLEMENTED: removing the Boot 1 BCD entry ('bcdedit /delete') is Phase 2C work. " +
-            "No BCD object was deleted.");
-    }
-
-    private async Task<RetirementExecutionResult> ExecutePinnedDeletionAsync(
-        int disk,
-        int partition,
-        PartitionIdentity expectedBoot1,
-        PartitionIdentity boot2,
-        RetirementDeletionPlan plan)
-    {
-        // Fresh GPT lookup immediately before any write. Letters are ignored.
-        var located = VolumeLocator.Enumerate();
-        var boot1Matches = located.WithGptPartitionId(PinnedRetirementTargets.Boot1GptId);
-        var boot2Matches = located.WithGptPartitionId(PinnedRetirementTargets.Boot2GptId);
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(validation);
 
         _log.Info(
             "executor",
-            "Pre-delete GPT snapshot: " +
-            $"boot1Matches={boot1Matches.Count} boot2Matches={boot2Matches.Count} " +
-            $"plannedDisk={disk} plannedPartition={partition}");
+            "DeleteBoot1BcdEntryAsync entered. " +
+            $"bcdOperationsImplemented={BcdOperationsImplemented} explicitOptIn={explicitOptIn} " +
+            $"boot1Bcd={state.Boot1BcdObjectId ?? "(missing)"}");
 
-        if (boot2Matches.Count != 1)
+        if (!BcdOperationsImplemented)
         {
-            throw new RetirementExecutionException(
-                $"Boot 2 GPT {PinnedRetirementTargets.Boot2Gpt} is not uniquely present " +
-                $"(matches={boot2Matches.Count}). Refusing to delete anything.");
+            throw new RetirementNotImplementedException(
+                "Phase 2C BCD deletion is disabled (BcdOperationsImplemented is false). " +
+                "No BCD object was deleted. bcdedit.exe was not started.");
         }
 
-        var liveBoot2 = boot2Matches[0];
-        if (liveBoot2.DiskNumber is not int boot2Disk || liveBoot2.PartitionNumber is not int boot2Part ||
-            !PinnedRetirementTargets.IsPinnedBoot2(boot2Disk, boot2Part, PinnedRetirementTargets.Boot2GptId))
-        {
-            throw new RetirementExecutionException(
-                $"Live Boot 2 is disk {liveBoot2.DiskNumber}/partition {liveBoot2.PartitionNumber}, " +
-                $"not {PinnedRetirementTargets.DescribeBoot2()}. Refusing to delete anything.");
-        }
-
-        if (!MatchesPinnedBoot2(boot2, out var boot2StateError))
-        {
-            throw new RetirementExecutionException(boot2StateError);
-        }
-
-        if (boot1Matches.Count == 0)
-        {
-            var already =
-                "Pre-delete lookup: Boot 1 GPT is already absent and Boot 2 is unique. " +
-                "diskpart will not run. destructiveDeletionOccurred=false";
-            _log.Info("executor", already);
-            return new RetirementExecutionResult
-            {
-                Kind = RetirementExecutionKind.AlreadyGone,
-                DestructiveDeletionOccurred = false,
-                Message = already,
-                Plan = plan
-            };
-        }
-
-        if (boot1Matches.Count != 1)
-        {
-            throw new RetirementExecutionException(
-                $"Boot 1 GPT {PinnedRetirementTargets.Boot1Gpt} matched {boot1Matches.Count} volumes. " +
-                "Refusing to choose. No diskpart was started.");
-        }
-
-        var live = boot1Matches[0];
-        if (live.DiskNumber is not int liveDisk || live.PartitionNumber is not int livePart)
-        {
-            throw new RetirementExecutionException("Live Boot 1 volume has no disk/partition number.");
-        }
-
-        if (!PinnedRetirementTargets.IsPinnedBoot1(liveDisk, livePart, PinnedRetirementTargets.Boot1GptId))
-        {
-            throw new RetirementExecutionException(
-                $"Live Boot 1 is disk {liveDisk} partition {livePart}, not {PinnedRetirementTargets.DescribeBoot1()}.");
-        }
-
-        if (liveDisk != disk || livePart != partition)
-        {
-            throw new RetirementExecutionException(
-                $"Plan named disk {disk} partition {partition} but live GPT resolved to " +
-                $"disk {liveDisk} partition {livePart}. Refusing.");
-        }
-
-        if (liveDisk != expectedBoot1.DiskNumber || livePart != expectedBoot1.PartitionNumber)
-        {
-            throw new RetirementExecutionException(
-                "Live disk/partition does not match the Boot 1 identity recorded at PENDING.");
-        }
-
-        if (PinnedRetirementTargets.IsProtectedPartition(liveDisk, livePart))
-        {
-            throw new RetirementExecutionException(
-                $"Disk {liveDisk} partition {livePart} is protected. Refusing.");
-        }
-
-        var running = new DiskValidator(_log).DescribeRunningSystemVolume();
-        if (VolumeLocator.TryParseGptId(running.GptPartitionId, out var runningGpt) &&
-            runningGpt == PinnedRetirementTargets.Boot1GptId)
-        {
-            throw new RetirementExecutionException(
-                "The running environment is the Boot 1 GPT volume. Refusing to delete the running volume.");
-        }
-
-        if (live.IsRunningSystemVolume)
-        {
-            throw new RetirementExecutionException(
-                "The live Boot 1 volume is the running system volume. Refusing.");
-        }
-
-        GptPartitionTypes.TryParse(
-            live.GptPartitionType is null ? null : VolumeLocator.FormatGptId(live.GptPartitionType.Value),
-            out var liveType);
-        if (liveType != GptPartitionTypes.BasicData)
-        {
-            throw new RetirementExecutionException(
-                $"Live GPT type is {GptPartitionTypes.Describe(liveType)}, not Basic Data. Refusing.");
-        }
-
-        _log.Info(
-            "executor",
-            "Pre-delete target confirmed: " + live.Describe() +
-            $" | destructiveDeletionOccurred about to become true if diskpart succeeds.");
-
-        var process = await RunDiskpartDeleteAsync(liveDisk, livePart);
-        if (process.ExitCode != 0)
-        {
-            var afterFail = ReadPinnedSnapshot();
-            throw new RetirementExecutionException(
-                "diskpart failed. No BOOT1_RETIRED will be recorded." +
-                Environment.NewLine + LoggedProcess.Describe(process) +
-                Environment.NewLine +
-                $"Post-fail snapshot: boot1Matches={afterFail.Boot1Count} boot2Matches={afterFail.Boot2Count}");
-        }
-
-        var after = ReadPinnedSnapshot();
-        if (after.Boot2Count != 1)
-        {
-            throw new RetirementExecutionException(
-                "CRITICAL: Boot 2 GPT is not uniquely present after diskpart. " +
-                $"boot2Matches={after.Boot2Count}. " + LoggedProcess.Describe(process));
-        }
-
-        if (after.Boot1Count != 0)
-        {
-            throw new RetirementExecutionException(
-                "diskpart exited 0 but Boot 1 GPT is still present. Treating as failure. " +
-                $"boot1Matches={after.Boot1Count}. " + LoggedProcess.Describe(process));
-        }
-
-        var success =
-            "Boot 1 partition removed. " +
-            $"target={PinnedRetirementTargets.DescribeBoot1()} " +
-            "destructiveDeletionOccurred=true. Boot 1 BCD entry was not deleted. " +
-            "Boot 2 was not moved or extended." +
-            Environment.NewLine + LoggedProcess.Describe(process);
-        _log.Info("executor", success);
-        return new RetirementExecutionResult
-        {
-            Kind = RetirementExecutionKind.Succeeded,
-            DestructiveDeletionOccurred = true,
-            Message = success,
-            Plan = plan
-        };
-    }
-
-    private async Task<LoggedProcessResult> RunDiskpartDeleteAsync(int disk, int partition)
-    {
-        if (!PinnedRetirementTargets.IsPinnedBoot1(disk, partition, PinnedRetirementTargets.Boot1GptId))
-        {
-            throw new RetirementExecutionException(
-                $"Refusing to write a diskpart script for disk {disk} partition {partition}.");
-        }
-
-        var script = BuildDiskpartScript(disk, partition);
-        var scriptPath = Path.Combine(Path.GetTempPath(), "cleanswitch-retire-boot1.txt");
-        await File.WriteAllTextAsync(scriptPath, script + Environment.NewLine, Encoding.ASCII);
-
-        var written = await File.ReadAllTextAsync(scriptPath, Encoding.ASCII);
-        var normalizedWritten = NormalizeScript(written);
-        var normalizedExpected = NormalizeScript(script);
-        if (!string.Equals(normalizedWritten, normalizedExpected, StringComparison.Ordinal))
-        {
-            throw new RetirementExecutionException(
-                "diskpart script on disk did not match the in-memory script. Refusing to start diskpart.");
-        }
-
-        if (!normalizedWritten.Contains($"select disk {PinnedRetirementTargets.Boot1Disk}", StringComparison.Ordinal) ||
-            !normalizedWritten.Contains($"select partition {PinnedRetirementTargets.Boot1Partition}", StringComparison.Ordinal) ||
-            !normalizedWritten.Contains("delete partition override", StringComparison.Ordinal) ||
-            normalizedWritten.Contains("select volume", StringComparison.OrdinalIgnoreCase) ||
-            normalizedWritten.Contains("select disk 1", StringComparison.Ordinal) ||
-            normalizedWritten.Contains($"select partition {PinnedRetirementTargets.Boot2Partition}", StringComparison.Ordinal))
-        {
-            throw new RetirementExecutionException(
-                "diskpart script failed the pin check. Refusing to start diskpart. " +
-                $"script={normalizedWritten}");
-        }
-
-        _log.Info("executor", $"diskpart script written to {scriptPath}: {normalizedWritten}");
-        return await LoggedProcess.RunAsync("diskpart.exe", ["/s", scriptPath], _log);
+        return await _bcdEngine.ExecuteAsync(state, explicitOptIn, validation);
     }
 
     private bool AreLiveGuardsSatisfied(bool explicitOptIn, bool validationPassed) =>
@@ -702,14 +545,6 @@ public sealed class RetirementExecutor
                 $"select partition {partition}",
                 "delete partition override"
             ]);
-
-    private static string NormalizeScript(string script) =>
-        string.Join(
-            "\n",
-            script.Replace("\r\n", "\n", StringComparison.Ordinal)
-                .Split('\n')
-                .Select(line => line.Trim())
-                .Where(line => line.Length > 0));
 
     private static RetirementDeletionPlan Incomplete(
         string reason,

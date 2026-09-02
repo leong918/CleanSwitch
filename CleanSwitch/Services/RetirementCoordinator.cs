@@ -1,4 +1,5 @@
 using CleanSwitch.Models;
+using CleanSwitch.Recovery;
 
 namespace CleanSwitch.Services;
 
@@ -44,10 +45,28 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
                 "A retirement operation needs both the Boot 1 and Boot 2 BCD identifiers.");
         }
 
-        if (string.Equals(boot1Id, boot2Id, StringComparison.OrdinalIgnoreCase))
+        if (!BcdIdentifiers.TryParseObjectId(boot1Id, out var boot1Bcd) ||
+            BcdIdentifiers.IsProtectedObject(boot1Bcd) ||
+            BcdIdentifiers.IsAlias(boot1Id))
         {
             throw new RetirementStateException(
-                $"Boot 1 and Boot 2 resolved to the same BCD identifier ({boot1Id}). Refusing to continue.");
+                $"Boot 1 BCD identifier '{boot1Id}' is not a concrete object GUID. " +
+                "Aliases such as {{current}} or {{bootmgr}} are refused. Nothing was written.");
+        }
+
+        if (!BcdIdentifiers.TryParseObjectId(boot2Id, out var boot2Bcd) ||
+            BcdIdentifiers.IsProtectedObject(boot2Bcd) ||
+            BcdIdentifiers.IsAlias(boot2Id))
+        {
+            throw new RetirementStateException(
+                $"Boot 2 BCD identifier '{boot2Id}' is not a concrete object GUID. " +
+                "Aliases such as {{current}} or {{bootmgr}} are refused. Nothing was written.");
+        }
+
+        if (boot1Bcd == boot2Bcd)
+        {
+            throw new RetirementStateException(
+                $"Boot 1 and Boot 2 resolved to the same BCD identifier ({BcdIdentifiers.Format(boot1Bcd)}). Refusing to continue.");
         }
 
         EnsureStableIdentity(boot1Identity, "Boot 1");
@@ -80,13 +99,15 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
         {
             Operation = RetirementState.RetireBoot1Operation,
             Status = RetirementStatus.Pending,
-            Boot1Id = boot1Id,
-            Boot2Id = boot2Id,
+            Boot1Id = BcdIdentifiers.Format(boot1Bcd),
+            Boot2Id = BcdIdentifiers.Format(boot2Bcd),
             RecoveryId = recoveryId,
             CreatedAtUtc = now,
             UpdatedAtUtc = now,
             SchemaVersion = RetirementState.CurrentSchemaVersion,
             Phase = "2B-identify",
+            Boot1BcdObjectId = BcdIdentifiers.Format(boot1Bcd),
+            Boot2BcdObjectId = BcdIdentifiers.Format(boot2Bcd),
             DestructiveDeletionPerformed = false,
             MachineName = Environment.MachineName,
             Boot1Identity = boot1Identity,
@@ -106,8 +127,9 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
 
         _log.Info(
             "coordinator",
-            $"Creating retirement operation: boot1={boot1Id} [{boot1Identity.Describe()}], " +
-            $"boot2={boot2Id} [{boot2Identity.Describe()}], recovery={recoveryId}, " +
+            $"Creating retirement operation: boot1={BcdIdentifiers.Format(boot1Bcd)} [{boot1Identity.Describe()}], " +
+            $"boot2={BcdIdentifiers.Format(boot2Bcd)} [{boot2Identity.Describe()}], recovery={recoveryId}, " +
+            $"boot1BcdObject={BcdIdentifiers.Format(boot1Bcd)} boot2BcdObject={BcdIdentifiers.Format(boot2Bcd)}, " +
             $"stateVolume=[{state.StateVolumeIdentity?.Describe() ?? "unknown"}].");
         _store.Save(state);
         return state;

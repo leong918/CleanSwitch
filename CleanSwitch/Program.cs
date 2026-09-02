@@ -11,6 +11,7 @@ internal static class Program
     private const string RecoveryRunSwitch = "--recovery-run";
     private const string RecoveryDryRunSwitch = "--recovery-dry-run";
     private const string RecoveryReviewSwitch = "--recovery-review";
+    private const string HardwareReviewSwitch = "--retirement-hardware-review";
     private const string ExecuteDeletionSwitch = "--execute-deletion";
     private const string ListVolumesSwitch = "--list-volumes";
 
@@ -20,27 +21,34 @@ internal static class Program
         var recoveryRun = HasSwitch(args, RecoveryRunSwitch);
         var recoveryDryRun = HasSwitch(args, RecoveryDryRunSwitch);
         var recoveryReview = HasSwitch(args, RecoveryReviewSwitch);
+        var hardwareReview = HasSwitch(args, HardwareReviewSwitch);
         var executeDeletion = HasSwitch(args, ExecuteDeletionSwitch);
+        var reviewOnly = (recoveryReview || hardwareReview) && !recoveryRun;
 
         if (HasSwitch(args, ListVolumesSwitch))
         {
             return ListVolumes();
         }
 
-        if (executeDeletion && !recoveryRun && !recoveryReview)
+        if (HasSwitch(args, RetirementAbandonCommand.Switch))
+        {
+            return RunAbandonRetirement(recoveryRun || recoveryDryRun || reviewOnly || executeDeletion);
+        }
+
+        if (executeDeletion && !recoveryRun && !recoveryReview && !hardwareReview)
         {
             ConsoleHost.Attach(allocateIfMissing: true);
-            Report("--execute-deletion is only accepted with --recovery-run or --recovery-review.");
+            Report("--execute-deletion is only accepted with --recovery-run, --recovery-review, or --retirement-hardware-review.");
             Report("This invocation did not start diskpart.");
             return 2;
         }
 
-        if (recoveryRun || recoveryDryRun || recoveryReview)
+        if (recoveryRun || recoveryDryRun || reviewOnly)
         {
             return RunRecoverySide(new RecoveryRunRequest(
                 DryRun: recoveryDryRun && !recoveryRun,
-                ReviewOnly: recoveryReview && !recoveryRun,
-                ExecuteDeletion: executeDeletion));
+                ReviewOnly: reviewOnly,
+                ExecuteDeletion: executeDeletion && !reviewOnly));
         }
 
         ApplicationConfiguration.Initialize();
@@ -49,10 +57,41 @@ internal static class Program
     }
 
     /// <summary>
+    /// Operator-visible abandon of a PENDING retirement state. Non-destructive:
+    /// archives first, then marks ABORTED. Never starts recovery, deletion, or a reboot.
+    /// </summary>
+    private static int RunAbandonRetirement(bool combinedWithOtherModes)
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+
+        if (combinedWithOtherModes)
+        {
+            Report("--abandon-retirement cannot be combined with recovery or deletion switches.");
+            Report("This invocation did not start diskpart, bcdedit, or a reboot.");
+            return PauseIfOwned(ownsConsole, 2);
+        }
+
+        return PauseIfOwned(ownsConsole, RetirementAbandonCommand.Run(Report));
+    }
+
+    private static int PauseIfOwned(bool ownsConsole, int exitCode)
+    {
+        if (ownsConsole)
+        {
+            Report(string.Empty);
+            Report("Press Enter to close this window...");
+            Console.In.ReadLine();
+        }
+
+        return exitCode;
+    }
+
+    /// <summary>
     /// Headless entry point for the recovery environment:
     /// <c>--recovery-run</c> validates and hands off to Boot 2.
     /// <c>--recovery-dry-run</c> validates and prints the deletion plan.
-    /// <c>--recovery-review</c> prints the live-delete review without changing state or disks.
+    /// <c>--recovery-review</c> / <c>--retirement-hardware-review</c> print a read-only
+    /// Phase 2B + 2C hardware review. No disk or BCD command is constructed or started.
     /// <c>--execute-deletion</c> is the runtime opt-in; it does nothing while live delete is disabled.
     /// </summary>
     private static int RunRecoverySide(RecoveryRunRequest request)
@@ -62,7 +101,7 @@ internal static class Program
         try
         {
             var options = AppConfiguration.Load();
-            var prefix = request.ReviewOnly ? "recovery-review" : request.DryRun ? "recovery-dryrun" : "recovery";
+            var prefix = request.ReviewOnly ? "hardware-review" : request.DryRun ? "recovery-dryrun" : "recovery";
             var services = RetirementServices.Create(options, prefix);
 
             Report($"Retirement state file: {services.Coordinator.StateFilePath}");
