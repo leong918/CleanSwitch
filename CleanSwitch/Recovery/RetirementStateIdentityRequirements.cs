@@ -1,4 +1,5 @@
 using CleanSwitch.Models;
+using CleanSwitch.Services;
 
 namespace CleanSwitch.Recovery;
 
@@ -15,6 +16,44 @@ public static class RetirementStateIdentityRequirements
         "partition start offset, partition size, or GPT type. " +
         "Create a new PENDING state with RETIRE SYSTEM so these fields are recorded " +
         "from the live GPT table.";
+
+    public const string IncompletePendingMessage =
+        "RETIRE SYSTEM refused to write a schema-v2 PENDING state because required " +
+        "destructive identity fields are missing. " +
+        "Disk GPT id, partition GPT id, GPT type, start offset and size must be read " +
+        "from the live partition table on Boot 1. Nothing was written.";
+
+    /// <summary>
+    /// Capture-time gate. Must pass before a schema-v2 PENDING file is created.
+    /// Never backfills missing fields.
+    /// </summary>
+    public static void ValidateForNewPending(
+        string boot1BcdObjectId,
+        string boot2BcdObjectId,
+        PartitionIdentity boot1Identity,
+        PartitionIdentity boot2Identity)
+    {
+        ArgumentNullException.ThrowIfNull(boot1Identity);
+        ArgumentNullException.ThrowIfNull(boot2Identity);
+
+        var missing = new List<string>();
+        missing.AddRange(MissingBcdObject(boot1BcdObjectId, "Boot 1"));
+        missing.AddRange(MissingBcdObject(boot2BcdObjectId, "Boot 2"));
+        missing.AddRange(MissingDestructiveFields(boot1Identity, "Boot 1"));
+        missing.AddRange(MissingDestructiveFields(boot2Identity, "Boot 2"));
+
+        if (missing.Count == 0)
+        {
+            return;
+        }
+
+        throw new RetirementStateException(
+            IncompletePendingMessage +
+            Environment.NewLine +
+            "Missing: " + string.Join("; ", missing) +
+            Environment.NewLine +
+            "Nothing was written.");
+    }
 
     public static void ValidateForDestructiveExecution(
         PartitionIdentity expectedBoot1,
@@ -55,12 +94,12 @@ public static class RetirementStateIdentityRequirements
             missing.Add($"{role} disk GPT identity");
         }
 
-        if (identity.PartitionStartingOffset is null)
+        if (identity.PartitionStartingOffset is null or < 0)
         {
             missing.Add($"{role} partition start offset");
         }
 
-        if (identity.PartitionSizeBytes is null)
+        if (identity.PartitionSizeBytes is null or <= 0)
         {
             missing.Add($"{role} partition size");
         }
@@ -71,5 +110,16 @@ public static class RetirementStateIdentityRequirements
         }
 
         return missing;
+    }
+
+    private static IReadOnlyList<string> MissingBcdObject(string? raw, string role)
+    {
+        if (!BcdIdentifiers.TryParseObjectId(raw, out var objectId) ||
+            BcdIdentifiers.IsProtectedObject(objectId))
+        {
+            return [$"{role} BCD concrete object GUID"];
+        }
+
+        return [];
     }
 }

@@ -61,6 +61,121 @@ public sealed class RetirementCoordinatorBcdCaptureTests
         Assert.Equal(boot1, loaded.Boot1BcdObjectId);
         Assert.Equal(boot2, loaded.Boot2BcdObjectId);
         Assert.Equal(2, loaded.SchemaVersion);
+        AssertCompleteDestructiveIdentity(loaded.Boot1Identity, RetirementFixtures.Boot1Identity());
+        AssertCompleteDestructiveIdentity(loaded.Boot2Identity, RetirementFixtures.Boot2Identity());
+        Assert.Contains("\"diskGptUniqueId\":", json, StringComparison.Ordinal);
+        Assert.Contains("\"partitionStartingOffset\":", json, StringComparison.Ordinal);
+        Assert.Contains("\"partitionSizeBytes\":", json, StringComparison.Ordinal);
+        Assert.Contains("\"gptPartitionType\":", json, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("diskGpt")]
+    [InlineData("gpt")]
+    [InlineData("type")]
+    [InlineData("offset")]
+    [InlineData("size")]
+    public void BeginRetirement_refuses_incomplete_boot1_identity_and_does_not_write(string missingField)
+    {
+        using var workspace = new TempStateWorkspace();
+        var coordinator = workspace.CreateCoordinator();
+        var boot1 = ClearField(RetirementFixtures.Boot1Identity(), missingField);
+
+        var exception = Assert.Throws<RetirementStateException>(() =>
+            coordinator.BeginRetirement(
+                BcdIdentifiers.Format(BcdFixtures.Boot1),
+                BcdIdentifiers.Format(BcdFixtures.Boot2),
+                BcdIdentifiers.Format(BcdFixtures.Recovery),
+                boot1,
+                RetirementFixtures.Boot2Identity()));
+
+        Assert.Contains(RetirementStateIdentityRequirements.IncompletePendingMessage, exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Nothing was written", exception.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(coordinator.StateFilePath));
+    }
+
+    [Theory]
+    [InlineData("diskGpt")]
+    [InlineData("gpt")]
+    [InlineData("type")]
+    [InlineData("offset")]
+    [InlineData("size")]
+    public void BeginRetirement_refuses_incomplete_boot2_identity_and_does_not_write(string missingField)
+    {
+        using var workspace = new TempStateWorkspace();
+        var coordinator = workspace.CreateCoordinator();
+        var boot2 = ClearField(RetirementFixtures.Boot2Identity(), missingField);
+
+        var exception = Assert.Throws<RetirementStateException>(() =>
+            coordinator.BeginRetirement(
+                BcdIdentifiers.Format(BcdFixtures.Boot1),
+                BcdIdentifiers.Format(BcdFixtures.Boot2),
+                BcdIdentifiers.Format(BcdFixtures.Recovery),
+                RetirementFixtures.Boot1Identity(),
+                boot2));
+
+        Assert.Contains(RetirementStateIdentityRequirements.IncompletePendingMessage, exception.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(coordinator.StateFilePath));
+    }
+
+    [Theory]
+    [InlineData("", "{bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2}")]
+    [InlineData("{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1}", "")]
+    [InlineData("{current}", "{bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2}")]
+    [InlineData("{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1}", "{default}")]
+    public void BeginRetirement_refuses_missing_or_alias_bcd_and_does_not_write(string boot1Id, string boot2Id)
+    {
+        using var workspace = new TempStateWorkspace();
+        var coordinator = workspace.CreateCoordinator();
+
+        var exception = Assert.Throws<RetirementStateException>(() =>
+            coordinator.BeginRetirement(
+                boot1Id,
+                boot2Id,
+                BcdIdentifiers.Format(BcdFixtures.Recovery),
+                RetirementFixtures.Boot1Identity(),
+                RetirementFixtures.Boot2Identity()));
+
+        Assert.False(File.Exists(coordinator.StateFilePath));
+        Assert.True(
+            exception.Message.Contains("concrete", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("both the Boot 1 and Boot 2", StringComparison.Ordinal));
+    }
+
+    private static PartitionIdentity ClearField(PartitionIdentity identity, string missingField)
+    {
+        switch (missingField)
+        {
+            case "diskGpt":
+                identity.DiskGptUniqueId = null;
+                break;
+            case "gpt":
+                identity.GptPartitionId = null;
+                break;
+            case "type":
+                identity.GptPartitionType = null;
+                break;
+            case "offset":
+                identity.PartitionStartingOffset = null;
+                break;
+            case "size":
+                identity.PartitionSizeBytes = null;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(missingField), missingField, null);
+        }
+
+        return identity;
+    }
+
+    private static void AssertCompleteDestructiveIdentity(PartitionIdentity? actual, PartitionIdentity expected)
+    {
+        Assert.NotNull(actual);
+        Assert.Equal(expected.DiskGptUniqueId, actual.DiskGptUniqueId, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(expected.GptPartitionId, actual.GptPartitionId, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(expected.GptPartitionType, actual.GptPartitionType, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(expected.PartitionStartingOffset, actual.PartitionStartingOffset);
+        Assert.Equal(expected.PartitionSizeBytes, actual.PartitionSizeBytes);
     }
 
     private sealed class TempStateWorkspace : IDisposable
