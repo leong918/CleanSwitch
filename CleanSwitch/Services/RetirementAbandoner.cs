@@ -4,7 +4,7 @@ using CleanSwitch.Models;
 namespace CleanSwitch.Services;
 
 /// <summary>
-/// Operator-visible, non-destructive abandon of a PENDING retirement operation.
+/// Operator-visible, non-destructive abandon of a stale retirement operation.
 /// Archives the exact live state file, verifies the archive, then marks the live
 /// operation ABORTED through <see cref="IRetirementCoordinator.MarkAborted"/>.
 /// Never starts diskpart, bcdedit, partition edits, BCD edits, or a reboot.
@@ -72,13 +72,20 @@ public sealed class RetirementAbandoner
                 "The live state file was not archived or changed.");
         }
 
-        if (state.Status != RetirementStatus.Pending)
+        if (!CanAbandon(state.Status))
         {
             throw new RetirementStateException(
                 $"Refusing to abandon a retirement operation with status " +
                 $"{RetirementStatusNames.ToWire(state.Status)}. " +
-                "Only PENDING operations can be abandoned with this command. " +
+                "Only PENDING, BOOT1_RETIRED, or FAILED operations can be abandoned with this command. " +
                 "The live state file was not archived or changed.");
+        }
+
+        if (state.Status == RetirementStatus.Boot1Retired)
+        {
+            reasonText =
+                "Operator superseded stale BOOT1_RETIRED operation for the deleted old Boot 1. " +
+                "A fresh schema-v2 PENDING capture is required for the new Boot 1 installation.";
         }
 
         Line("Archiving the exact live state file before any write...");
@@ -139,6 +146,11 @@ public sealed class RetirementAbandoner
     /// </summary>
     public static bool AllowsNewRetirement(RetirementState? existing) =>
         existing is null || existing.IsTerminal || existing.Status == RetirementStatus.Failed;
+
+    private static bool CanAbandon(RetirementStatus status) =>
+        status is RetirementStatus.Pending
+            or RetirementStatus.Boot1Retired
+            or RetirementStatus.Failed;
 
     private static RetirementState ReadSnapshot(string path)
     {

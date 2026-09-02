@@ -220,6 +220,9 @@ public sealed class RetirementAbandonerTests
         var archiverSource = ReadRepoFile("CleanSwitch", "Services", "FileRetirementStateArchiver.cs");
         var commandSource = ReadRepoFile("CleanSwitch", "RetirementAbandonCommand.cs");
 
+        Assert.Contains("ConfigureForAbandon(options)", commandSource, StringComparison.Ordinal);
+        Assert.Contains("AllowStateOnSystemVolume = true", commandSource, StringComparison.Ordinal);
+
         foreach (var source in new[] { abandonerSource, archiverSource, commandSource })
         {
             Assert.DoesNotContain("IDestructiveDiskCommand", source, StringComparison.Ordinal);
@@ -234,6 +237,135 @@ public sealed class RetirementAbandonerTests
         }
 
         Assert.Contains("--abandon-retirement", ReadRepoFile("CleanSwitch", "Program.cs"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Abandon_succeeds_when_state_is_on_running_system_volume_without_appsettings_override()
+    {
+        var folder = CreateSystemVolumeTestFolder();
+        try
+        {
+            var options = new CleanSwitchOptions
+            {
+                RecoveryDataPath = folder,
+                StateFileName = "retirement-state-test.json",
+                AllowStateOnSystemVolume = false
+            };
+            RetirementAbandonCommand.ConfigureForAbandon(options);
+
+            var log = new RecordingOperationLog();
+            var store = new RetirementStateStore(options, log);
+            store.EnsureWritable();
+            var coordinator = new RetirementCoordinator(store, log);
+            var created = new DateTimeOffset(2026, 9, 2, 9, 0, 0, TimeSpan.Zero);
+            store.Save(new RetirementState
+            {
+                Operation = RetirementState.RetireBoot1Operation,
+                Status = RetirementStatus.Pending,
+                SchemaVersion = 2,
+                Phase = "2B-identify",
+                CreatedAtUtc = created,
+                UpdatedAtUtc = created,
+                Boot1Id = BcdIdentifiers.Format(BcdFixtures.Boot1),
+                Boot2Id = BcdIdentifiers.Format(BcdFixtures.Boot2),
+                RecoveryId = BcdIdentifiers.Format(BcdFixtures.Recovery),
+                Boot1BcdObjectId = BcdIdentifiers.Format(BcdFixtures.Boot1),
+                Boot2BcdObjectId = BcdIdentifiers.Format(BcdFixtures.Boot2),
+                MachineName = "TEST-PC",
+                Boot1Identity = RetirementFixtures.Boot1Identity(),
+                Boot2Identity = RetirementFixtures.Boot2Identity(),
+                Transitions =
+                [
+                    new RetirementTransition
+                    {
+                        From = RetirementStatus.Pending,
+                        To = RetirementStatus.Pending,
+                        AtUtc = created,
+                        Reason = "seed"
+                    }
+                ]
+            });
+
+            var result = new RetirementAbandoner(coordinator, log).Execute();
+
+            Assert.Equal(RetirementStatus.Aborted, result.Reloaded.Status);
+            Assert.True(result.Reloaded.IsTerminal);
+            Assert.True(File.Exists(result.ArchivePath));
+        }
+        finally
+        {
+            TryDeleteDirectory(folder);
+        }
+    }
+
+    [Fact]
+    public void Normal_retirement_services_reject_state_on_running_system_volume()
+    {
+        var folder = CreateSystemVolumeTestFolder();
+        try
+        {
+            var options = new CleanSwitchOptions
+            {
+                RecoveryDataPath = folder,
+                StateFileName = "retirement-state-test.json",
+                AllowStateOnSystemVolume = false
+            };
+
+            var exception = Assert.Throws<RetirementStorageException>(() =>
+                RetirementServices.Create(options, "test"));
+
+            Assert.Contains("being retired", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(folder);
+        }
+    }
+
+    [Fact]
+    public void System_volume_override_is_scoped_to_abandon_only()
+    {
+        var folder = CreateSystemVolumeTestFolder();
+        try
+        {
+            var defaultOptions = new CleanSwitchOptions
+            {
+                RecoveryDataPath = folder,
+                StateFileName = "retirement-state-test.json",
+                AllowStateOnSystemVolume = false
+            };
+
+            Assert.Throws<RetirementStorageException>(() =>
+            {
+                var store = new RetirementStateStore(defaultOptions, new RecordingOperationLog());
+                store.EnsureWritable();
+            });
+
+            var abandonOptions = new CleanSwitchOptions
+            {
+                RecoveryDataPath = folder,
+                StateFileName = "retirement-state-test.json",
+                AllowStateOnSystemVolume = false
+            };
+            RetirementAbandonCommand.ConfigureForAbandon(abandonOptions);
+            Assert.True(abandonOptions.AllowStateOnSystemVolume);
+            Assert.False(defaultOptions.AllowStateOnSystemVolume);
+
+            var store = new RetirementStateStore(abandonOptions, new RecordingOperationLog());
+            store.EnsureWritable();
+        }
+        finally
+        {
+            TryDeleteDirectory(folder);
+        }
+    }
+
+    [Fact]
+    public void Default_appsettings_keep_allow_state_on_system_volume_false()
+    {
+        var settings = ReadRepoFile("CleanSwitch", "appsettings.json");
+        Assert.Contains("\"AllowStateOnSystemVolume\": false", settings, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"AllowStateOnSystemVolume\": true", settings, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -291,6 +423,29 @@ public sealed class RetirementAbandonerTests
     }
 
     private static string Sha256Hex(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
+
+    private static string CreateSystemVolumeTestFolder()
+    {
+        var root = Path.GetPathRoot(Environment.SystemDirectory)
+            ?? throw new InvalidOperationException("System root unavailable.");
+        var folder = Path.Combine(root, $"cs-sysvol-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
+
+    private static void TryDeleteDirectory(string folder)
+    {
+        try
+        {
+            if (Directory.Exists(folder))
+            {
+                Directory.Delete(folder, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+        }
+    }
 
     private static string ReadRepoFile(params string[] relative)
     {
