@@ -350,7 +350,8 @@ What RETIRE SYSTEM does today:
 2. Validates the recovery data location (must exist, be writable, and not be the running
    Windows volume).
 3. Validates the exact Recovery BCD entry and resolves the `winre.wim` it names.
-4. Mounts that WIM read-only and verifies the exact `winpeshl.ini`, launcher manifest,
+4. Byte-copies that WIM into a validated machine-level workspace, mounts only the copy
+   read-only, and verifies the exact `winpeshl.ini`, launcher manifest,
    embedded executable/configuration hashes, ProductVersion, RecoveryGuid and
    `RecoveryDataVolumeGptId` contract.
 5. Captures Boot 1 and Boot 2 GPT identities and writes schema-v2 `PENDING`.
@@ -385,14 +386,48 @@ CleanSwitch.exe --provision-winre-launcher
 CleanSwitch.exe --winre-launcher-review
 ```
 
-Provisioning is refused unless both destructive compile-time gates and
+Preparation is refused unless both destructive compile-time gates and
 `EnableDestructiveRetirement` are true, and it is also refused while any non-terminal
-retirement state exists. It mounts only the selected WIM, embeds the exact running EXE and
-adjacent appsettings, and installs a strict `winpeshl.ini` that invokes
-`--recovery-run --execute-deletion`. State remains external and is located by the configured
-GPT partition GUID, so Boot 1/Boot 2/WinRE drive-letter changes are irrelevant.
+retirement state exists. It copies the selected WIM byte-for-byte into
+`%ProgramData%\CleanSwitch\WinRE\operation-<guid>\source-copy`, verifies source/copy size and
+SHA256, services only the copy, then remounts that copy read-only. The prepared image embeds
+the exact running EXE and adjacent appsettings and installs an ordered `winpeshl.ini`: the
+official `--recovery-run --execute-deletion` entry point first, followed by stock WinRE's
+`%SYSTEMDRIVE%\sources\recovery\RecEnv.exe`. Installing the prepared WIM into the registered
+live WinRE location is a separate, explicitly authorized deployment operation; this command
+does not replace the live WIM. State remains external and is located by the configured GPT
+partition GUID, so Boot 1/Boot 2/WinRE drive-letter changes are irrelevant.
 
-Phase 2A repeats the complete read-only WIM proof on every RETIRE SYSTEM attempt. A stock,
+Live deployment is a separate journaled transaction and is compiled out of the default safe
+profile. A live-test build still requires both the deployment command and its explicit runtime
+opt-in:
+
+```text
+CleanSwitch.exe --deploy-winre-launcher --prepared-winre <prepared-Winre.wim> --execute-winre-deployment
+CleanSwitch.exe --winre-deployment-status
+CleanSwitch.exe --recover-winre-deployment --execute-winre-deployment
+```
+
+Before each REAgentC or WIM mutation, an append-only SHA-256 chained journal writes and flushes
+an intent record. Verification and a flushed completion record follow the operation. Any
+non-terminal or malformed journal blocks GUI startup, RETIRE SYSTEM, recovery deletion, and a
+new deployment. Recovery is rollback-only; the complete BCD snapshot is never automatically
+imported. The transaction stops at `AwaitingSmoke` even after live launcher review passes.
+
+Inside WinRE, `--recovery-smoke --deployment-transaction <id>` is a separate non-retirement entry point. It validates the
+embedded manifest/payload and RecoveryData GPT identity, rejects an active retirement state,
+writes a durable smoke receipt, and never constructs `RecoveryRunner` or `RetirementExecutor`.
+After returning to Boot 2, the receipt is bound to the open journal with:
+
+```text
+CleanSwitch.exe --complete-winre-smoke --receipt <receipt.json>
+```
+
+Only that step makes the deployment journal terminal. `--recovery-run --execute-deletion`
+remains exclusively the real PENDING retirement entry point.
+
+Phase 2A repeats the complete read-only proof against a fresh byte-exact WIM copy on every
+RETIRE SYSTEM attempt. A stock,
 missing, stale, ambiguous, or differently hashed launcher fails before a new operation is
 written.
 

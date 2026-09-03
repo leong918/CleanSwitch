@@ -20,4 +20,16 @@ public static class ProductionRetirementGates
 #else
         false;
 #endif
+
+    /// <summary>
+    /// Compile-time gate for the separately authorized WinRE deployment transaction.
+    /// The default build can inspect journals and run recovery smoke, but cannot invoke
+    /// REAgentC or replace a registered WIM.
+    /// </summary>
+    public const bool WinReDeploymentImplemented =
+#if CLEANSWITCH_LIVE_TEST_BUILD
+        true;
+#else
+        false;
+#endif
 }

@@ -21,6 +21,12 @@ internal static class Program
     private const string RepairPendingHandoffReviewSwitch = "--repair-pending-handoff-review";
     private const string ProvisionWinReLauncherSwitch = "--provision-winre-launcher";
     private const string WinReLauncherReviewSwitch = "--winre-launcher-review";
+    private const string DeployWinReLauncherSwitch = "--deploy-winre-launcher";
+    private const string ExecuteWinReDeploymentSwitch = "--execute-winre-deployment";
+    private const string RecoverWinReDeploymentSwitch = "--recover-winre-deployment";
+    private const string WinReDeploymentStatusSwitch = "--winre-deployment-status";
+    private const string RecoverySmokeSwitch = "--recovery-smoke";
+    private const string CompleteWinReSmokeSwitch = "--complete-winre-smoke";
 
     [STAThread]
     static int Main(string[] args)
@@ -34,7 +40,50 @@ internal static class Program
         var repairPendingHandoffReview = HasSwitch(args, RepairPendingHandoffReviewSwitch);
         var provisionWinReLauncher = HasSwitch(args, ProvisionWinReLauncherSwitch);
         var winReLauncherReview = HasSwitch(args, WinReLauncherReviewSwitch);
+        var deployWinReLauncher = HasSwitch(args, DeployWinReLauncherSwitch);
+        var recoverWinReDeployment = HasSwitch(args, RecoverWinReDeploymentSwitch);
+        var winReDeploymentStatus = HasSwitch(args, WinReDeploymentStatusSwitch);
+        var recoverySmoke = HasSwitch(args, RecoverySmokeSwitch);
+        var completeWinReSmoke = HasSwitch(args, CompleteWinReSmokeSwitch);
         var reviewOnly = (recoveryReview || hardwareReview) && !recoveryRun;
+
+        if (recoverySmoke)
+        {
+            return RunRecoverySmoke(args);
+        }
+
+        if (winReDeploymentStatus)
+        {
+            return RunWinReDeploymentStatus(args.Length != 1);
+        }
+
+        if (recoverWinReDeployment)
+        {
+            return RunWinReDeploymentRecovery(args);
+        }
+
+        if (completeWinReSmoke)
+        {
+            return RunCompleteWinReSmoke(args);
+        }
+
+        var deploymentInventory = WinReDeploymentJournalDiscovery.Inspect();
+        if (deploymentInventory.Invalid.Count > 0 || deploymentInventory.Active.Count > 0)
+        {
+            ConsoleHost.Attach(allocateIfMissing: true);
+            Report("An incomplete or invalid WinRE deployment transaction exists.");
+            Report("CleanSwitch will not start a new operation or its GUI until deterministic rollback recovery completes.");
+            foreach (var item in deploymentInventory.Invalid) Report("INVALID: " + item);
+            foreach (var item in deploymentInventory.Active)
+                Report($"ACTIVE: {item.Path} stage={item.Last.Stage} sequence={item.Last.Sequence}");
+            Report("Use --winre-deployment-status or --recover-winre-deployment. No mutation was attempted.");
+            return 3;
+        }
+
+        if (deployWinReLauncher)
+        {
+            return RunWinReDeployment(args);
+        }
 
         if (provisionWinReLauncher || winReLauncherReview)
         {
@@ -91,6 +140,195 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
         return 0;
+    }
+
+    private static int RunRecoverySmoke(string[] args)
+    {
+        // winpeshl LaunchApps waits for each process to exit before starting the next entry.
+        // Never allocate or pause an interactive console here; stock RecEnv must run next.
+        ConsoleHost.Attach(allocateIfMissing: false);
+        try
+        {
+            EnsureOnlyOptions(args, new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                RecoverySmokeSwitch, "--deployment-transaction"
+            });
+            var transactionId = GetOptionValue(args, "--deployment-transaction")
+                ?? throw new InvalidOperationException("--recovery-smoke requires --deployment-transaction <id>.");
+            var result = new RecoverySmokeRunner(
+                AppConfiguration.Load(), new WindowsRecoverySmokeEnvironment(), transactionId).Run();
+            Report(result.Message);
+            Report($"Smoke receipt: {result.ReceiptPath}");
+            Report($"Smoke receipt SHA256: {result.ReceiptSha256}");
+            Report("No RecoveryRunner, RetirementExecutor, disk command, BCD command, or retirement state store was instantiated.");
+            return result.Passed ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            Report("Recovery smoke failed closed: " + exception.Message);
+            Report("No retirement executor or destructive command was instantiated.");
+            return 2;
+        }
+    }
+
+    private static int RunWinReDeploymentStatus(bool combined)
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+        if (combined)
+        {
+            Report("--winre-deployment-status cannot be combined with another mode.");
+            return PauseIfOwned(ownsConsole, 2);
+        }
+
+        var inventory = WinReDeploymentJournalDiscovery.Inspect();
+        foreach (var invalid in inventory.Invalid) Report("INVALID: " + invalid);
+        foreach (var active in inventory.Active)
+            Report($"ACTIVE: {active.Path} stage={active.Last.Stage} sequence={active.Last.Sequence}");
+        if (inventory.Invalid.Count == 0 && inventory.Active.Count == 0) Report("No unresolved WinRE deployment transaction.");
+        return PauseIfOwned(ownsConsole, inventory.Invalid.Count == 0 ? 0 : 2);
+    }
+
+    private static int RunWinReDeployment(string[] args)
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+        try
+        {
+            if (!ProductionRetirementGates.WinReDeploymentImplemented)
+                throw new InvalidOperationException("This safe build has WinReDeploymentImplemented=false.");
+            if (!HasSwitch(args, ExecuteWinReDeploymentSwitch))
+                throw new InvalidOperationException("Live WinRE deployment additionally requires explicit --execute-winre-deployment.");
+            var prepared = GetOptionValue(args, "--prepared-winre")
+                ?? throw new InvalidOperationException("--prepared-winre <absolute prepared Winre.wim path> is required.");
+            var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                DeployWinReLauncherSwitch, ExecuteWinReDeploymentSwitch, "--prepared-winre"
+            };
+            EnsureOnlyOptions(args, allowed);
+
+            var options = AppConfiguration.Load();
+            var log = FileOperationLog.Create(RetirementStateStore.ResolveLogDirectory(options), "winre-deploy");
+            var plan = WinReDeploymentPlanBuilder.BuildAsync(options, prepared, log).GetAwaiter().GetResult();
+            var journalPath = Path.Combine(
+                WinReDeploymentJournalDiscovery.MachineRoot,
+                plan.TransactionId,
+                "deployment-journal.ndjson");
+            var transaction = new WinReDeploymentTransaction(
+                new FileWinReDeploymentJournal(journalPath),
+                new WindowsWinReDeploymentPlatform(options, log));
+            var result = transaction.DeployAsync(plan).GetAwaiter().GetResult();
+            Report(result.Message);
+            Report($"Journal: {result.JournalPath}");
+            Report("RETIRE SYSTEM remains forbidden until smoke evidence is recorded and the journal becomes terminal.");
+            return PauseIfOwned(ownsConsole, result.Passed ? 0 : 1);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or RetirementStorageException)
+        {
+            Report("WinRE deployment failed closed: " + exception.Message);
+            Report("Inspect --winre-deployment-status; an incomplete journal requires --recover-winre-deployment.");
+            return PauseIfOwned(ownsConsole, 2);
+        }
+    }
+
+    private static int RunWinReDeploymentRecovery(string[] args)
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+        try
+        {
+            if (!ProductionRetirementGates.WinReDeploymentImplemented)
+                throw new InvalidOperationException("This safe build cannot mutate WinRE during rollback recovery.");
+            if (!HasSwitch(args, ExecuteWinReDeploymentSwitch))
+                throw new InvalidOperationException("Rollback recovery requires explicit --execute-winre-deployment.");
+            EnsureOnlyOptions(args, new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                RecoverWinReDeploymentSwitch, ExecuteWinReDeploymentSwitch
+            });
+            var inventory = WinReDeploymentJournalDiscovery.Inspect();
+            if (inventory.Invalid.Count != 0 || inventory.Active.Count != 1)
+                throw new InvalidOperationException("Recovery requires exactly one valid unresolved deployment journal.");
+            var active = inventory.Active[0];
+            var options = AppConfiguration.Load();
+            var log = FileOperationLog.Create(RetirementStateStore.ResolveLogDirectory(options), "winre-deploy-recovery");
+            var transaction = new WinReDeploymentTransaction(
+                new FileWinReDeploymentJournal(active.Path),
+                new WindowsWinReDeploymentPlatform(options, log));
+            var result = transaction.RecoverToRollbackAsync().GetAwaiter().GetResult();
+            Report(result.Message);
+            Report($"Journal: {result.JournalPath}");
+            return PauseIfOwned(ownsConsole, result.Passed ? 0 : 1);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or RetirementStorageException)
+        {
+            Report("WinRE deployment recovery failed closed: " + exception.Message);
+            return PauseIfOwned(ownsConsole, 2);
+        }
+    }
+
+    private static int RunCompleteWinReSmoke(string[] args)
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+        try
+        {
+            EnsureOnlyOptions(args, new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                CompleteWinReSmokeSwitch, "--receipt"
+            });
+            var receipt = GetOptionValue(args, "--receipt")
+                ?? throw new InvalidOperationException("--receipt <recovery smoke receipt path> is required.");
+            var inventory = WinReDeploymentJournalDiscovery.Inspect();
+            if (inventory.Invalid.Count != 0 || inventory.Active.Count != 1 ||
+                inventory.Active[0].Last.Stage != WinReDeploymentStage.AwaitingSmoke)
+                throw new InvalidOperationException("Smoke completion requires exactly one valid AwaitingSmoke deployment journal.");
+            var active = inventory.Active[0];
+            var receiptHash = RecoverySmokeReceiptVerifier.Verify(receipt, active.Plan);
+            var options = AppConfiguration.Load();
+            var transaction = new WinReDeploymentTransaction(
+                new FileWinReDeploymentJournal(active.Path),
+                new WindowsWinReDeploymentPlatform(options));
+            transaction.RecordSmokeVerified(receiptHash);
+            var result = transaction.CommitAfterSmokeAsync().GetAwaiter().GetResult();
+            Report(result.Message);
+            Report($"Journal: {result.JournalPath}");
+            return PauseIfOwned(ownsConsole, 0);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or InvalidDataException)
+        {
+            Report("WinRE smoke completion failed closed: " + exception.Message);
+            return PauseIfOwned(ownsConsole, 2);
+        }
+    }
+
+    private static string? GetOptionValue(string[] args, string option)
+    {
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (args[index].StartsWith(option + "=", StringComparison.OrdinalIgnoreCase))
+                return args[index][(option.Length + 1)..];
+            if (string.Equals(args[index], option, StringComparison.OrdinalIgnoreCase) && index + 1 < args.Length)
+                return args[index + 1];
+        }
+        return null;
+    }
+
+    private static void EnsureOnlyOptions(string[] args, HashSet<string> allowed)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < args.Length; index++)
+        {
+            var raw = args[index];
+            var name = raw.Split('=', 2)[0];
+            if (!name.StartsWith("--", StringComparison.Ordinal))
+                throw new InvalidOperationException($"Unexpected positional argument '{raw}'.");
+            if (!allowed.Contains(name)) throw new InvalidOperationException($"Unexpected option '{name}'.");
+            if (!seen.Add(name)) throw new InvalidOperationException($"Duplicate option '{name}'.");
+            if ((string.Equals(name, "--prepared-winre", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(name, "--receipt", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(name, "--deployment-transaction", StringComparison.OrdinalIgnoreCase)) && !raw.Contains('='))
+            {
+                if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+                    throw new InvalidOperationException($"Option '{name}' requires a value.");
+                index++;
+            }
+        }
     }
 
     private static int RunWinReLauncher(bool provision, bool combinedWithOtherModes)
@@ -154,9 +392,18 @@ internal static class Program
                 Report($"Validated WinRE image: {result.ImagePath}");
             }
 
+            if (!string.IsNullOrWhiteSpace(result.PreparedImagePath))
+            {
+                Report($"Prepared WinRE image: {result.PreparedImagePath}");
+            }
+            if (!string.IsNullOrWhiteSpace(result.PreparedBundlePath))
+            {
+                Report($"Prepared WinRE deployment bundle: {result.PreparedBundlePath}");
+            }
+
             Report(provision
-                ? "Provisioning changes only the selected offline winre.wim; it does not change BCD, retirement state, partitions, bootsequence, or reboot."
-                : "Review was read-only; no WIM, BCD, retirement state, partition, bootsequence, or reboot was changed.");
+                ? "Preparation changed only a verified machine-level WIM copy. Deploying it to live WinRE requires a separate explicit operation. No live WIM, BCD, retirement state, partition, bootsequence, or reboot was changed."
+                : "Review copied the live WIM and inspected only that temporary copy. No live WIM, BCD, retirement state, partition, bootsequence, or reboot was changed.");
             return PauseIfOwned(ownsConsole, result.Passed ? 0 : 1);
         }
         catch (Exception exception) when (
@@ -164,7 +411,7 @@ internal static class Program
                 BootManagerException or IOException or UnauthorizedAccessException)
         {
             Report("WinRE launcher operation failed closed.");
-            Report("No BCD, retirement state, disk, boot sequence, or reboot was changed.");
+            Report("No live WIM, BCD, retirement state, disk, boot sequence, or reboot was changed.");
             Report(exception.Message);
             return PauseIfOwned(ownsConsole, 2);
         }

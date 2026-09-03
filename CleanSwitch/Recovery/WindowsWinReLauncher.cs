@@ -106,11 +106,27 @@ public sealed class WindowsWinReLauncherValidator : IWinReLauncherValidator
 {
     private readonly CleanSwitchOptions _options;
     private readonly IOperationLog _log;
+    private readonly IWinReWorkspaceFactory _workspaceFactory;
+    private readonly IWinReDismRunner _dism;
+    private readonly IWinReFileCopier _copier;
 
     public WindowsWinReLauncherValidator(CleanSwitchOptions options, IOperationLog? log = null)
+        : this(options, log, new WindowsWinReWorkspaceFactory(), new LoggedWinReDismRunner(), new WinReFileCopier())
+    {
+    }
+
+    internal WindowsWinReLauncherValidator(
+        CleanSwitchOptions options,
+        IOperationLog? log,
+        IWinReWorkspaceFactory workspaceFactory,
+        IWinReDismRunner dism,
+        IWinReFileCopier copier)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _log = log ?? NullOperationLog.Instance;
+        _workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
+        _dism = dism ?? throw new ArgumentNullException(nameof(dism));
+        _copier = copier ?? throw new ArgumentNullException(nameof(copier));
     }
 
     public async Task<WinReLauncherValidationResult> ValidateAsync(
@@ -145,9 +161,18 @@ public sealed class WindowsWinReLauncherValidator : IWinReLauncherValidator
             return new WinReLauncherValidationResult(report, imagePath);
         }
 
+        WinReServicingWorkspace? workspace = null;
         try
         {
-            await using var mount = await DismWinReImageMount.MountAsync(imagePath, readOnly: true, _log, cancellationToken);
+            var sourceSize = new FileInfo(imagePath).Length;
+            workspace = _workspaceFactory.Create(sourceSize);
+            if (!WinReImageCopy.TryCopyAndVerify(imagePath, workspace.PreparedImagePath, _copier, report))
+            {
+                return new WinReLauncherValidationResult(report, imagePath);
+            }
+
+            await using var mount = await DismWinReImageMount.MountAsync(
+                workspace.PreparedImagePath, readOnly: true, workspace, _dism, _log, cancellationToken);
             var payload = WinReLauncherContract.ValidateOfflineRoot(mount.MountDirectory, expected);
             foreach (var check in payload.Checks)
             {
@@ -158,6 +183,13 @@ public sealed class WindowsWinReLauncherValidator : IWinReLauncherValidator
             exception is RetirementExecutionException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             report.Fail("recovery-image-inspectable", $"The selected WinRE image could not be inspected fail-closed: {exception.Message}");
+        }
+        finally
+        {
+            if (workspace is not null)
+            {
+                await WinReWorkspaceCleanup.AddResultAsync(workspace, _dism, _log, report);
+            }
         }
 
         foreach (var check in report.Checks)
@@ -193,11 +225,27 @@ public sealed class WindowsWinReLauncherProvisioner
 {
     private readonly CleanSwitchOptions _options;
     private readonly IOperationLog _log;
+    private readonly IWinReWorkspaceFactory _workspaceFactory;
+    private readonly IWinReDismRunner _dism;
+    private readonly IWinReFileCopier _copier;
 
     public WindowsWinReLauncherProvisioner(CleanSwitchOptions options, IOperationLog? log = null)
+        : this(options, log, new WindowsWinReWorkspaceFactory(), new LoggedWinReDismRunner(), new WinReFileCopier())
+    {
+    }
+
+    internal WindowsWinReLauncherProvisioner(
+        CleanSwitchOptions options,
+        IOperationLog? log,
+        IWinReWorkspaceFactory workspaceFactory,
+        IWinReDismRunner dism,
+        IWinReFileCopier copier)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _log = log ?? NullOperationLog.Instance;
+        _workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
+        _dism = dism ?? throw new ArgumentNullException(nameof(dism));
+        _copier = copier ?? throw new ArgumentNullException(nameof(copier));
     }
 
     public async Task<WinReLauncherValidationResult> ProvisionAsync(
@@ -214,31 +262,197 @@ public sealed class WindowsWinReLauncherProvisioner
         }
 
         var expected = WindowsWinReLauncherValidator.CreateCurrentExpectation(_options, recovery.Identifier);
-        await using (var mount = await DismWinReImageMount.MountAsync(imagePath, readOnly: false, _log, cancellationToken))
+        var report = new ValidationReport("WinRE CleanSwitch launcher prepared image");
+        var workspace = _workspaceFactory.Create(new FileInfo(imagePath).Length);
+        var preservePreparedImage = false;
+        try
         {
-            WinReLauncherContract.WritePayload(mount.MountDirectory, expected);
-            var staged = WinReLauncherContract.ValidateOfflineRoot(mount.MountDirectory, expected);
-            if (!staged.Passed)
+            report.Pass("recovery-image-resolved", diagnostic);
+            if (!WinReImageCopy.TryCopyAndVerify(imagePath, workspace.PreparedImagePath, _copier, report))
             {
-                return new WinReLauncherValidationResult(staged, imagePath);
+                return new WinReLauncherValidationResult(report, imagePath);
             }
 
-            await mount.CommitAsync(cancellationToken);
+            await using (var mount = await DismWinReImageMount.MountAsync(
+                             workspace.PreparedImagePath, readOnly: false, workspace, _dism, _log, cancellationToken))
+            {
+                WinReLauncherContract.WritePayload(mount.MountDirectory, expected);
+                var staged = WinReLauncherContract.ValidateOfflineRoot(mount.MountDirectory, expected);
+                foreach (var check in staged.Checks)
+                {
+                    report.Add("staged-" + check.Name, check.Passed, check.Detail);
+                }
+
+                if (!staged.Passed)
+                {
+                    return new WinReLauncherValidationResult(report, imagePath);
+                }
+
+                await mount.CommitAsync(cancellationToken);
+            }
+
+            await using (var verificationMount = await DismWinReImageMount.MountAsync(
+                             workspace.PreparedImagePath, readOnly: true, workspace, _dism, _log, cancellationToken))
+            {
+                var verified = WinReLauncherContract.ValidateOfflineRoot(verificationMount.MountDirectory, expected);
+                foreach (var check in verified.Checks)
+                {
+                    report.Add("verified-" + check.Name, check.Passed, check.Detail);
+                }
+
+                if (!verified.Passed)
+                {
+                    return new WinReLauncherValidationResult(report, imagePath);
+                }
+            }
+
+            preservePreparedImage = true;
+            var preparedBundlePath = Path.Combine(workspace.OperationRoot, "prepared-winre-bundle.json");
+            var bundle = new PreparedWinReBundleManifest
+            {
+                BundleId = Guid.NewGuid().ToString("N"),
+                CreatedAtUtc = DateTimeOffset.UtcNow,
+                PreparedWimFileName = Path.GetFileName(workspace.PreparedImagePath),
+                PreparedWimSize = new FileInfo(workspace.PreparedImagePath).Length,
+                PreparedWimSha256 = HashFile(workspace.PreparedImagePath),
+                OriginalLiveWimPath = Path.GetFullPath(imagePath),
+                OriginalLiveWimSize = new FileInfo(imagePath).Length,
+                OriginalLiveWimSha256 = HashFile(imagePath),
+                Launcher = expected.Manifest
+            };
+            WriteBundleDurably(preparedBundlePath, bundle);
+            report.Pass(
+                "live-winre-unchanged",
+                $"Prepared and verified '{workspace.PreparedImagePath}'. The live WIM '{imagePath}' was read only and was not serviced.");
+            report.Pass(
+                "explicit-deployment-required",
+                "Installing the prepared image into the registered WinRE location requires a separate, explicitly authorized deployment step.");
+            return new WinReLauncherValidationResult(report, imagePath, workspace.PreparedImagePath, preparedBundlePath);
+        }
+        finally
+        {
+            if (!preservePreparedImage)
+            {
+                await WinReWorkspaceCleanup.AddResultAsync(workspace, _dism, _log, report);
+            }
+        }
+    }
+
+    private static string HashFile(string path)
+    {
+        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+    }
+
+    private static void WriteBundleDurably(string path, PreparedWinReBundleManifest bundle)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(
+            System.Text.Json.JsonSerializer.Serialize(bundle, new System.Text.Json.JsonSerializerOptions
+            {
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+                WriteIndented = true
+            }) + Environment.NewLine);
+        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough);
+        stream.Write(bytes);
+        stream.Flush(flushToDisk: true);
+    }
+}
+
+internal interface IWinReFileCopier
+{
+    void Copy(string source, string destination);
+}
+
+internal sealed class WinReFileCopier : IWinReFileCopier
+{
+    public void Copy(string source, string destination) => File.Copy(source, destination, overwrite: false);
+}
+
+internal static class WinReImageCopy
+{
+    public static bool TryCopyAndVerify(
+        string source,
+        string destination,
+        IWinReFileCopier copier,
+        ValidationReport report)
+    {
+        var sourceInfo = new FileInfo(source);
+        var sourceHash = HashFile(source);
+        report.Pass("source-wim-recorded", $"size={sourceInfo.Length}, sha256={sourceHash}, path='{source}'.");
+        copier.Copy(source, destination);
+
+        var copyInfo = new FileInfo(destination);
+        var copyHash = HashFile(destination);
+        var sizeMatches = sourceInfo.Length == copyInfo.Length;
+        var hashMatches = string.Equals(sourceHash, copyHash, StringComparison.OrdinalIgnoreCase);
+        report.Add("source-copy-size", sizeMatches,
+            $"source={sourceInfo.Length}, copy={copyInfo.Length}, path='{destination}'.");
+        report.Add("source-copy-hash", hashMatches,
+            $"source={sourceHash}, copy={copyHash}.");
+        return sizeMatches && hashMatches;
+    }
+
+    private static string HashFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+    }
+}
+
+internal interface IWinReDismRunner
+{
+    Task<LoggedProcessResult> RunAsync(IReadOnlyList<string> arguments, IOperationLog log);
+}
+
+internal sealed class LoggedWinReDismRunner : IWinReDismRunner
+{
+    public Task<LoggedProcessResult> RunAsync(IReadOnlyList<string> arguments, IOperationLog log) =>
+        LoggedProcess.RunAsync("dism.exe", arguments, log);
+}
+
+internal static class WinReWorkspaceCleanup
+{
+    public static async Task AddResultAsync(
+        WinReServicingWorkspace workspace,
+        IWinReDismRunner dism,
+        IOperationLog log,
+        ValidationReport report)
+    {
+        var cleaned = workspace.TryCleanupOwned(out var diagnostic);
+        if (cleaned)
+        {
+            report.Pass("workspace-cleanup", diagnostic);
+            return;
         }
 
-        var validator = new WindowsWinReLauncherValidator(_options, _log);
-        return await validator.ValidateAsync(recovery, cancellationToken);
+        var mounted = await dism.RunAsync(
+            ["/English", "/Get-MountedImageInfo"], log);
+        var noMountedImages = mounted.ExitCode == 0 &&
+                              mounted.StdOut.Contains("No mounted images found", StringComparison.OrdinalIgnoreCase);
+        var detail = diagnostic + " " +
+                     (noMountedImages
+                         ? "DISM reports no mounted images; residue was reported and no broader cleanup was attempted."
+                         : "DISM did not prove an empty mounted-image list; residue was reported and no broader cleanup was attempted.");
+        report.Fail("workspace-cleanup", detail);
+        log.Write(OperationLogLevel.Warning, "winre-workspace", detail);
     }
 }
 
 internal sealed class DismWinReImageMount : IAsyncDisposable
 {
     private readonly IOperationLog _log;
+    private readonly IWinReDismRunner _dism;
+    private readonly WinReServicingWorkspace _workspace;
     private bool _unmounted;
 
-    private DismWinReImageMount(string mountDirectory, IOperationLog log)
+    private DismWinReImageMount(
+        WinReServicingWorkspace workspace,
+        IWinReDismRunner dism,
+        IOperationLog log)
     {
-        MountDirectory = mountDirectory;
+        _workspace = workspace;
+        _dism = dism;
+        MountDirectory = workspace.MountDirectory;
         _log = log;
     }
 
@@ -247,34 +461,38 @@ internal sealed class DismWinReImageMount : IAsyncDisposable
     public static async Task<DismWinReImageMount> MountAsync(
         string imagePath,
         bool readOnly,
+        WinReServicingWorkspace workspace,
+        IWinReDismRunner dism,
         IOperationLog log,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var mountDirectory = Path.Combine(Path.GetTempPath(), "CleanSwitch-WinRE-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(mountDirectory);
+        workspace.RequireEmptyMountDirectory();
         var arguments = new List<string>
         {
             "/English",
+            $"/ScratchDir:{workspace.ScratchDirectory}",
+            $"/LogPath:{workspace.CreateDismLogPath(readOnly ? "mount-readonly" : "mount-service")}",
             "/Mount-Image",
             $"/ImageFile:{imagePath}",
             "/Index:1",
-            $"/MountDir:{mountDirectory}"
+            $"/MountDir:{workspace.MountDirectory}"
         };
         if (readOnly)
         {
             arguments.Add("/ReadOnly");
         }
 
-        var result = await LoggedProcess.RunAsync("dism.exe", arguments, log);
+        var result = await dism.RunAsync(arguments, log);
         if (result.ExitCode != 0)
         {
-            TryDeleteUniqueMountDirectory(mountDirectory);
             throw new RetirementExecutionException(
-                "DISM could not mount the selected WinRE image. " + LoggedProcess.Describe(result));
+                "DISM could not mount the prepared WinRE image. " + LoggedProcess.Describe(result) +
+                Environment.NewLine + $"Scoped workspace residue, if any: '{workspace.OperationRoot}'. " +
+                "No global DISM cleanup was attempted.");
         }
 
-        return new DismWinReImageMount(mountDirectory, log);
+        return new DismWinReImageMount(workspace, dism, log);
     }
 
     public async Task CommitAsync(CancellationToken cancellationToken)
@@ -285,8 +503,15 @@ internal sealed class DismWinReImageMount : IAsyncDisposable
             throw new InvalidOperationException("The WinRE image is already unmounted.");
         }
 
-        var result = await LoggedProcess.RunAsync(
-            "dism.exe", ["/English", "/Unmount-Image", $"/MountDir:{MountDirectory}", "/Commit"], _log);
+        var result = await _dism.RunAsync(
+            [
+                "/English",
+                $"/ScratchDir:{_workspace.ScratchDirectory}",
+                $"/LogPath:{_workspace.CreateDismLogPath("commit")}",
+                "/Unmount-Image",
+                $"/MountDir:{MountDirectory}",
+                "/Commit"
+            ], _log);
         if (result.ExitCode != 0)
         {
             throw new RetirementExecutionException(
@@ -294,15 +519,21 @@ internal sealed class DismWinReImageMount : IAsyncDisposable
         }
 
         _unmounted = true;
-        TryDeleteUniqueMountDirectory(MountDirectory);
     }
 
     public async ValueTask DisposeAsync()
     {
         if (!_unmounted)
         {
-            var result = await LoggedProcess.RunAsync(
-                "dism.exe", ["/English", "/Unmount-Image", $"/MountDir:{MountDirectory}", "/Discard"], _log);
+            var result = await _dism.RunAsync(
+                [
+                    "/English",
+                    $"/ScratchDir:{_workspace.ScratchDirectory}",
+                    $"/LogPath:{_workspace.CreateDismLogPath("discard")}",
+                    "/Unmount-Image",
+                    $"/MountDir:{MountDirectory}",
+                    "/Discard"
+                ], _log);
             _unmounted = result.ExitCode == 0;
             if (!_unmounted)
             {
@@ -312,34 +543,5 @@ internal sealed class DismWinReImageMount : IAsyncDisposable
             }
         }
 
-        if (_unmounted)
-        {
-            TryDeleteUniqueMountDirectory(MountDirectory);
-        }
-    }
-
-    private static void TryDeleteUniqueMountDirectory(string path)
-    {
-        var full = Path.GetFullPath(path);
-        var temp = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!full.StartsWith(temp, StringComparison.OrdinalIgnoreCase) ||
-            !Path.GetFileName(full).StartsWith("CleanSwitch-WinRE-", StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        try
-        {
-            if (Directory.Exists(full))
-            {
-                Directory.Delete(full, recursive: true);
-            }
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
     }
 }

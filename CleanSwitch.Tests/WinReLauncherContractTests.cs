@@ -30,7 +30,7 @@ public sealed class WinReLauncherContractTests
         using var fixture = LauncherFixture.Create();
         Directory.CreateDirectory(Path.Combine(fixture.Root, "Windows", "System32"));
         File.WriteAllText(Path.Combine(fixture.Root, "Windows", "System32", "winpeshl.ini"),
-            "[LaunchApp]\r\nAppPath=%SYSTEMROOT%\\System32\\recenv.exe\r\n");
+            "[LaunchApp]\r\nAppPath=X:\\sources\\recovery\\recenv.exe\r\n");
 
         var report = fixture.Validate();
 
@@ -123,6 +123,98 @@ public sealed class WinReLauncherContractTests
     }
 
     [Fact]
+    public void Stock_winre_fallback_path_is_required_and_verified()
+    {
+        using var fixture = LauncherFixture.Create();
+        fixture.WriteValidPayload();
+
+        var report = fixture.Validate();
+
+        Assert.Contains(report.Checks, check => check.Name == "launcher-fallback-present" && check.Passed);
+        Assert.Equal(
+            @"%SYSTEMDRIVE%\sources\recovery\RecEnv.exe",
+            fixture.Expectation.Manifest.FallbackExecutablePath);
+    }
+
+    [Fact]
+    public void Missing_stock_winre_fallback_fails_before_payload_write()
+    {
+        using var fixture = LauncherFixture.Create();
+        File.Delete(Path.Combine(fixture.Root, WinReLauncherContract.FallbackExecutableRelativePath));
+
+        var exception = Assert.Throws<InvalidOperationException>(fixture.WriteValidPayload);
+
+        Assert.Contains("approved fallback", exception.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(fixture.Root, WinReLauncherContract.ExecutableRelativePath)));
+        Assert.False(File.Exists(Path.Combine(fixture.Root, WinReLauncherContract.WinpeshlRelativePath)));
+    }
+
+    [Fact]
+    public void Obsolete_system32_recenv_contract_fails_closed()
+    {
+        using var fixture = LauncherFixture.Create();
+        fixture.WriteValidPayload();
+        File.WriteAllText(
+            Path.Combine(fixture.Root, WinReLauncherContract.WinpeshlRelativePath),
+            "[LaunchApps]\r\n" +
+            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-run --execute-deletion\r\n" +
+            "%SYSTEMROOT%\\System32\\recenv.exe\r\n");
+
+        var report = fixture.Validate();
+
+        Assert.False(report.Passed);
+        Assert.Contains(report.Checks, check => check.Name == "launcher-startup" && !check.Passed);
+    }
+
+    [Fact]
+    public void Additional_or_ambiguous_launchapps_entry_fails_exact_contract()
+    {
+        using var fixture = LauncherFixture.Create();
+        fixture.WriteValidPayload();
+        File.AppendAllText(
+            Path.Combine(fixture.Root, WinReLauncherContract.WinpeshlRelativePath),
+            "%SYSTEMROOT%\\System32\\recenv.exe\r\n");
+
+        var report = fixture.Validate();
+
+        Assert.False(report.Passed);
+        Assert.Contains(report.Checks, check => check.Name == "launcher-startup" && !check.Passed);
+    }
+
+    [Fact]
+    public void Launchapps_order_is_recovery_runner_then_stock_recenv()
+    {
+        var runner = WinReLauncherContract.WinpeshlContents.IndexOf(
+            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-run --execute-deletion",
+            StringComparison.Ordinal);
+        var fallback = WinReLauncherContract.WinpeshlContents.IndexOf(
+            WinReLauncherContract.FallbackExecutableRuntimePath,
+            StringComparison.Ordinal);
+
+        Assert.StartsWith("[LaunchApps]\r\n", WinReLauncherContract.WinpeshlContents, StringComparison.Ordinal);
+        Assert.True(runner >= 0);
+        Assert.True(fallback > runner);
+        Assert.DoesNotContain("%SYSTEMROOT%\\System32\\recenv.exe", WinReLauncherContract.WinpeshlContents,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Wrong_fallback_path_in_manifest_fails_closed()
+    {
+        using var fixture = LauncherFixture.Create();
+        fixture.WriteValidPayload();
+        fixture.RewriteManifest(manifest => manifest with
+        {
+            FallbackExecutablePath = @"%SYSTEMROOT%\System32\recenv.exe"
+        });
+
+        var report = fixture.Validate();
+
+        Assert.False(report.Passed);
+        Assert.Contains(report.Checks, check => check.Name == "launcher-fallback-path" && !check.Passed);
+    }
+
+    [Fact]
     public void Active_pending_state_forbids_winre_provisioning()
     {
         var state = new RetirementState { Status = RetirementStatus.Pending };
@@ -181,6 +273,9 @@ public sealed class WinReLauncherContractTests
             var root = Path.Combine(Path.GetTempPath(), "CleanSwitch-WinRE-Fixture-" + Guid.NewGuid().ToString("N"));
             var source = Path.Combine(root, "source");
             Directory.CreateDirectory(source);
+            var fallback = Path.Combine(root, WinReLauncherContract.FallbackExecutableRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(fallback)!);
+            File.WriteAllText(fallback, "stock WinRE RecEnv fixture");
             var exe = Path.Combine(source, "CleanSwitch.exe");
             File.Copy(typeof(WinReLauncherContractTests).Assembly.Location, exe);
             var config = Path.Combine(source, "appsettings.json");

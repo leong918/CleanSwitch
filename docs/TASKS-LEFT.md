@@ -18,11 +18,19 @@ Live deletion of Boot 1 will not run in this build: `DestructiveOperationsImplem
 
 ## Phase 2A leftovers
 
-4. **Implemented; deployment still required.** Stock WinRE does not auto-start CleanSwitch.
-   `--provision-winre-launcher` now mounts the exact WIM selected by `RecoveryGuid`, embeds
-   the approved self-contained EXE/config plus a hash/version/GPT manifest, and installs an
-   exact `winpeshl.ini` RecoveryRunner command. Phase 2A mounts the WIM read-only and proves
-   that complete contract before identity capture, PENDING, BCD mutation, or reboot.
+4. **Prepared-copy implementation complete; live deployment still required.** Stock WinRE
+   does not auto-start CleanSwitch. `--provision-winre-launcher` now byte-copies the exact
+   WIM selected by `RecoveryGuid` into a validated machine-level workspace, services only
+   that copy, and remounts it read-only to prove the approved EXE/config, manifest,
+   RecoveryRunner arguments, and stock `%SYSTEMDRIVE%\sources\recovery\RecEnv.exe` fallback.
+   Installing the prepared WIM into live WinRE is a separate, compile/runtime-gated,
+   hash-chained journal transaction. The implementation snapshots REAgentC/full BCD, verifies
+   an exact original-WIM backup, uses disable/setreimage/enable, rolls incomplete transactions
+   back deterministically, and requires a dedicated non-retirement `--recovery-smoke` receipt.
+   Real-machine deployment remains unauthorized and the disposable-VM REAgentC cycle is still
+   required before hardware use.
+   Phase 2A likewise validates only a fresh WIM copy before identity capture, PENDING, BCD
+   mutation, or reboot.
 5. **Open.** Confirm `--list-volumes` in WinRE still reports Boot 2 as `{4a16be66-dfc5-4b2a-bf95-a7d7d4d2e6fb}` (letter may differ). That is the proof the GPT locator survived the reboot.
 6. **Open.** After a successful run, keep exactly one `retirement-state.json` on Boot 2's volume, with `status: COMPLETE` and `destructiveDeletionPerformed: false`.
 

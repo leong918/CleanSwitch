@@ -39,6 +39,37 @@ public sealed class WinReLauncherDispatchTests
         Assert.Contains("ExecuteDeletion: executeDeletion && !reviewOnly", program, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Deployment_and_smoke_dispatch_precede_gui_and_are_separately_gated()
+    {
+        var source = File.ReadAllText(FindRepoFile("CleanSwitch", "Program.cs"));
+        var smoke = source.IndexOf("if (recoverySmoke)", StringComparison.Ordinal);
+        var incomplete = source.IndexOf("WinReDeploymentJournalDiscovery.Inspect()", StringComparison.Ordinal);
+        var deploy = source.IndexOf("if (deployWinReLauncher)", StringComparison.Ordinal);
+        var gui = source.IndexOf("ApplicationConfiguration.Initialize();", StringComparison.Ordinal);
+
+        Assert.True(smoke >= 0 && incomplete > smoke && deploy > incomplete && gui > deploy);
+        Assert.Contains("--recovery-smoke", source, StringComparison.Ordinal);
+        Assert.Contains("--execute-winre-deployment", source, StringComparison.Ordinal);
+        Assert.Contains("--recover-winre-deployment", source, StringComparison.Ordinal);
+        Assert.Contains("--winre-deployment-status", source, StringComparison.Ordinal);
+        Assert.Contains("--complete-winre-smoke", source, StringComparison.Ordinal);
+        var smokeMethod = source[source.IndexOf("private static int RunRecoverySmoke", StringComparison.Ordinal)..
+            source.IndexOf("private static int RunWinReDeploymentStatus", StringComparison.Ordinal)];
+        Assert.Contains("Attach(allocateIfMissing: false)", smokeMethod, StringComparison.Ordinal);
+        Assert.DoesNotContain("PauseIfOwned", smokeMethod, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Safe_build_cannot_execute_WinRE_deployment()
+    {
+#if CLEANSWITCH_LIVE_TEST_BUILD
+        Assert.True(ProductionRetirementGates.WinReDeploymentImplemented);
+#else
+        Assert.False(ProductionRetirementGates.WinReDeploymentImplemented);
+#endif
+    }
+
     private static string FindRepoFile(params string[] parts)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

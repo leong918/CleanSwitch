@@ -8,13 +8,14 @@ namespace CleanSwitch.Recovery;
 
 public sealed record WinReLauncherManifest
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     public int SchemaVersion { get; init; } = CurrentSchemaVersion;
     public string RecoveryGuid { get; init; } = string.Empty;
     public string ExecutableRelativePath { get; init; } = WinReLauncherContract.ExecutableRelativePath;
     public string ConfigurationRelativePath { get; init; } = WinReLauncherContract.ConfigurationRelativePath;
     public string[] Arguments { get; init; } = WinReLauncherContract.RecoveryArguments.ToArray();
+    public string FallbackExecutablePath { get; init; } = WinReLauncherContract.FallbackExecutableRuntimePath;
     public string ExecutableSha256 { get; init; } = string.Empty;
     public string ConfigurationSha256 { get; init; } = string.Empty;
     public string ProductVersion { get; init; } = string.Empty;
@@ -27,9 +28,28 @@ public sealed record WinReLauncherExpectation(
     string SourceExecutablePath,
     string SourceConfigurationPath);
 
-public sealed record WinReLauncherValidationResult(ValidationReport Report, string? ImagePath = null)
+public sealed record WinReLauncherValidationResult(
+    ValidationReport Report,
+    string? ImagePath = null,
+    string? PreparedImagePath = null,
+    string? PreparedBundlePath = null)
 {
     public bool Passed => Report.Passed;
+}
+
+public sealed record PreparedWinReBundleManifest
+{
+    public const int CurrentSchemaVersion = 1;
+    public int SchemaVersion { get; init; } = CurrentSchemaVersion;
+    public required string BundleId { get; init; }
+    public required DateTimeOffset CreatedAtUtc { get; init; }
+    public required string PreparedWimFileName { get; init; }
+    public required long PreparedWimSize { get; init; }
+    public required string PreparedWimSha256 { get; init; }
+    public required string OriginalLiveWimPath { get; init; }
+    public required long OriginalLiveWimSize { get; init; }
+    public required string OriginalLiveWimSha256 { get; init; }
+    public required WinReLauncherManifest Launcher { get; init; }
 }
 
 public interface IWinReLauncherValidator
@@ -78,6 +98,8 @@ public static class WinReLauncherContract
     public const string ConfigurationRelativePath = PayloadDirectory + @"\appsettings.json";
     public const string ManifestRelativePath = PayloadDirectory + @"\winre-launcher-manifest.json";
     public const string WinpeshlRelativePath = @"Windows\System32\winpeshl.ini";
+    public const string FallbackExecutableRelativePath = @"sources\recovery\RecEnv.exe";
+    public const string FallbackExecutableRuntimePath = @"%SYSTEMDRIVE%\sources\recovery\RecEnv.exe";
 
     public static readonly IReadOnlyList<string> RecoveryArguments =
         ["--recovery-run", "--execute-deletion"];
@@ -85,7 +107,7 @@ public static class WinReLauncherContract
     public static readonly string WinpeshlContents =
         "[LaunchApps]\r\n" +
         "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-run --execute-deletion\r\n" +
-        "%SYSTEMROOT%\\System32\\recenv.exe\r\n";
+        FallbackExecutableRuntimePath + "\r\n";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -156,8 +178,15 @@ public static class WinReLauncherContract
         var exePath = UnderRoot(offlineRoot, ExecutableRelativePath);
         var configPath = UnderRoot(offlineRoot, ConfigurationRelativePath);
         var manifestPath = UnderRoot(offlineRoot, ManifestRelativePath);
+        var fallbackPath = UnderRoot(offlineRoot, FallbackExecutableRelativePath);
 
         ValidateExactText(report, "launcher-startup", winpeshlPath, WinpeshlContents);
+        report.Add(
+            "launcher-fallback-present",
+            File.Exists(fallbackPath),
+            File.Exists(fallbackPath)
+                ? $"Found approved stock WinRE fallback '{FallbackExecutableRelativePath}'."
+                : $"Missing approved stock WinRE fallback '{FallbackExecutableRelativePath}'.");
         report.Add(
             "launcher-executable-present",
             File.Exists(exePath),
@@ -210,6 +239,13 @@ public static class WinReLauncherContract
 
     public static void WritePayload(string offlineRoot, WinReLauncherExpectation expected)
     {
+        var fallback = UnderRoot(offlineRoot, FallbackExecutableRelativePath);
+        if (!File.Exists(fallback))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to provision WinRE because the approved fallback '{FallbackExecutableRelativePath}' is absent.");
+        }
+
         var payload = UnderRoot(offlineRoot, PayloadDirectory);
         Directory.CreateDirectory(payload);
         Directory.CreateDirectory(Path.GetDirectoryName(UnderRoot(offlineRoot, WinpeshlRelativePath))!);
@@ -236,6 +272,7 @@ public static class WinReLauncherContract
         AddExact(report, "launcher-recovery-guid", actual.RecoveryGuid, expected.RecoveryGuid);
         AddExact(report, "launcher-executable-path", actual.ExecutableRelativePath, expected.ExecutableRelativePath);
         AddExact(report, "launcher-configuration-path", actual.ConfigurationRelativePath, expected.ConfigurationRelativePath);
+        AddExact(report, "launcher-fallback-path", actual.FallbackExecutablePath, expected.FallbackExecutablePath);
         AddExact(report, "launcher-manifest-executable-hash", actual.ExecutableSha256, expected.ExecutableSha256);
         AddExact(report, "launcher-manifest-configuration-hash", actual.ConfigurationSha256, expected.ConfigurationSha256);
         AddExact(report, "launcher-manifest-product-version", actual.ProductVersion, expected.ProductVersion);

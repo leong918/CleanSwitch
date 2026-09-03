@@ -52,8 +52,9 @@ public sealed class Phase2AHandoff
                     Environment.NewLine + recovery.Report.Describe());
             }
 
-            // A stock WinRE entry is not a recovery continuation. Mount and inspect the exact
-            // WIM selected by RecoveryGuid before capturing identities or writing PENDING.
+            // A stock WinRE entry is not a recovery continuation. Byte-copy the exact WIM
+            // selected by RecoveryGuid into the validated machine-level workspace, then mount
+            // and inspect only that copy before capturing identities or writing PENDING.
             // The manifest, winpeshl.ini, embedded executable, appsettings, ProductVersion,
             // hashes and official RecoveryRunner arguments must all match this running build.
             reportStage?.Invoke("Verifying the CleanSwitch launcher inside the selected WinRE image...");

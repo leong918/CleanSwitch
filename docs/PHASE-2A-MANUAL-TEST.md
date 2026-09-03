@@ -1,7 +1,8 @@
 # Phase 2A manual test procedure (historical/non-production)
 
-> Production RETIRE SYSTEM now refuses to create PENDING unless the exact WinRE image
-> selected by `RecoveryGuid` contains the verified CleanSwitch `winpeshl.ini`, manifest,
+> Production RETIRE SYSTEM now refuses to create PENDING unless a byte-exact machine-level
+> copy of the WinRE image selected by `RecoveryGuid` contains the verified CleanSwitch
+> `winpeshl.ini`, manifest,
 > executable and configuration payload. Manual launch from stock WinRE is not accepted as
 > a production continuation. The steps below are retained only as historical test evidence.
 
