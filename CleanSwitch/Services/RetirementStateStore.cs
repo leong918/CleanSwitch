@@ -38,10 +38,11 @@ public sealed record RetirementLocationPreview(
 /// Reads and writes the retirement state file.
 /// <para>
 /// Location rule: the state file must NOT live only on the volume that is going to be
-/// retired, otherwise the recovery-side run would lose its instructions the moment the
-/// deletion succeeded. The location is rejected outright when it resolves onto the running
-/// Windows volume, unless the operator opts in with
-/// <c>CleanSwitch:AllowStateOnSystemVolume</c> (test-only).
+/// retired, otherwise the recovery-side run would lose its instructions the moment deletion
+/// succeeded. Creation retains the conservative running-Windows boundary and then proves the
+/// state host distinct from freshly captured Boot 1. Existing schema-v2 operations instead
+/// prove the host against the persisted Boot 1 identity; running Windows and drive letters are
+/// not identities. Legacy operations retain the conservative running-volume policy.
 /// </para>
 /// <para>
 /// Identity rule: a drive letter designates a different volume in each environment the
@@ -74,17 +75,33 @@ public sealed class RetirementStateStore
     private readonly IOperationLog _log;
     private readonly string _stateFileName;
     private readonly string _folderName;
+    private readonly RetirementStateAccessContext _accessContext;
+    private readonly bool _allowStateOnSystemVolume;
+    private readonly bool _allowFixedVolumeScan;
+    private readonly IGptLayoutSource _layout;
+    private bool _stateVolumeIsRunningWindows;
     private bool _scanned;
 
-    public RetirementStateStore(CleanSwitchOptions options, IOperationLog? log = null)
+    public RetirementStateStore(
+        CleanSwitchOptions options,
+        IOperationLog? log = null,
+        RetirementStateAccessContext accessContext = RetirementStateAccessContext.CreateNewOperation,
+        IGptLayoutSource? layout = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         _log = log ?? NullOperationLog.Instance;
+        _accessContext = accessContext;
+        _allowStateOnSystemVolume = options.AllowStateOnSystemVolume;
+        _allowFixedVolumeScan = string.IsNullOrWhiteSpace(options.RecoveryDataVolumeGptId);
+        _layout = layout ?? new VolumeLocatorGptLayoutSource();
 
-        var resolution = ResolveStateLocation(options);
+        var resolution = ResolveStateLocation(
+            options,
+            rejectRunningWindowsVolume: accessContext == RetirementStateAccessContext.CreateNewOperation);
         ConfiguredStateFilePath = resolution.StateFilePath;
         StateFilePath = resolution.StateFilePath;
         StateVolumeIdentity = resolution.VolumeIdentity;
+        _stateVolumeIsRunningWindows = resolution.IsRunningWindowsVolume;
         _stateFileName = resolution.StateFileName;
         _folderName = resolution.FolderName;
 
@@ -143,7 +160,7 @@ public sealed class RetirementStateStore
     /// safety checks as the constructor.
     /// </summary>
     public static string ResolveStateFilePath(CleanSwitchOptions options) =>
-        ResolveStateLocation(options).StateFilePath;
+        ResolveStateLocation(options, rejectRunningWindowsVolume: true).StateFilePath;
 
     /// <summary>
     /// What the current configuration points at, with nothing created and nothing written.
@@ -174,7 +191,9 @@ public sealed class RetirementStateStore
         }
     }
 
-    private static StateLocation ResolveStateLocation(CleanSwitchOptions options)
+    private static StateLocation ResolveStateLocation(
+        CleanSwitchOptions options,
+        bool rejectRunningWindowsVolume)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -215,7 +234,7 @@ public sealed class RetirementStateStore
             ? VolumeIdentity.AreSameVolume(configuredVolume, systemVolume)
             : string.Equals(mountPoint, systemMountPoint, StringComparison.OrdinalIgnoreCase);
 
-        if (onSystemVolume && !options.AllowStateOnSystemVolume)
+        if (rejectRunningWindowsVolume && onSystemVolume && !options.AllowStateOnSystemVolume)
         {
             throw new RetirementStorageException(
                 $"The retirement data folder ('{root}', resolved by {resolvedRoot.Source}) resolves to the " +
@@ -253,7 +272,8 @@ public sealed class RetirementStateStore
             fileName,
             resolvedRoot.FolderName,
             resolvedRoot.Source,
-            resolvedRoot.VolumeIdentity ?? TryDescribeVolumeForPath(root, "Volume hosting the retirement data folder"));
+            resolvedRoot.VolumeIdentity ?? TryDescribeVolumeForPath(root, "Volume hosting the retirement data folder"),
+            onSystemVolume);
     }
 
     /// <summary>
@@ -421,7 +441,8 @@ public sealed class RetirementStateStore
         string StateFileName,
         string FolderName,
         string Source,
-        PartitionIdentity? VolumeIdentity);
+        PartitionIdentity? VolumeIdentity,
+        bool IsRunningWindowsVolume);
 
     /// <summary>
     /// Confirms the configured location is actually writable right now. Called before the
@@ -451,6 +472,35 @@ public sealed class RetirementStateStore
     public bool Exists() => File.Exists(StateFilePath);
 
     /// <summary>
+    /// Capture-time state-location boundary. Called by <see cref="RetirementCoordinator"/>
+    /// after Boot 1 identity capture and before it reads or writes an operation.
+    /// </summary>
+    public void ValidateForNewOperation(PartitionIdentity retiringBoot1)
+    {
+        ArgumentNullException.ThrowIfNull(retiringBoot1);
+
+        if (_accessContext != RetirementStateAccessContext.CreateNewOperation)
+        {
+            throw new RetirementStorageException(
+                "A new retirement operation cannot be created through an existing-state or operator-abandon store.");
+        }
+
+        if (_allowStateOnSystemVolume)
+        {
+            _log.Warn(
+                "state-store",
+                "TEST-ONLY AllowStateOnSystemVolume bypassed the complete GPT state-location proof for a new operation.");
+            return;
+        }
+
+        StateVolumeSafetyValidator.ValidateForNewOperation(
+            StateVolumeIdentity,
+            retiringBoot1,
+            _layout.Capture());
+        _log.Info("state-store", "New-operation state volume is uniquely proven distinct from retiring Boot 1.");
+    }
+
+    /// <summary>
     /// Loads the state file. When nothing is at the configured location, falls back to
     /// scanning every fixed volume for <c>&lt;volume&gt;\&lt;folder&gt;\&lt;state file&gt;</c>,
     /// because in WinRE and on Boot 2 the configured drive letter points at a different
@@ -462,6 +512,16 @@ public sealed class RetirementStateStore
         if (!File.Exists(StateFilePath))
         {
             _log.Info("state-store", $"No retirement state file at '{StateFilePath}'.");
+
+            if (!_allowFixedVolumeScan)
+            {
+                _log.Warn(
+                    "state-store",
+                    "RecoveryDataVolumeGptId is configured and authoritative. The configured volume contains no " +
+                    "state file, so fixed-volume fallback scanning is disabled; an old state on another volume " +
+                    "will not be adopted.");
+                return null;
+            }
 
             var scanned = TryAdoptScannedStateFile();
             if (scanned is null)
@@ -525,12 +585,61 @@ public sealed class RetirementStateStore
                 $"but only '{RetirementState.RetireBoot1Operation}' is supported.");
         }
 
+        ValidateExistingStateLocation(state, path);
+
         _log.Info(
             "state-store",
             $"Loaded retirement state from '{path}': status={RetirementStatusNames.ToWire(state.Status)}, " +
             $"boot1={state.Boot1Id}, boot2={state.Boot2Id}, transitions={state.Transitions.Count}.");
 
         return state;
+    }
+
+    private void ValidateExistingStateLocation(RetirementState state, string path)
+    {
+        if (_accessContext == RetirementStateAccessContext.OperatorAbandon)
+        {
+            _log.Info(
+                "state-store",
+                "Operator-abandon context accepted the state location for archive-and-abort only. " +
+                "This context cannot create or execute a retirement operation.");
+            return;
+        }
+
+        if (_accessContext == RetirementStateAccessContext.CreateNewOperation)
+        {
+            // The constructor already applied the conservative running-volume boundary;
+            // BeginRetirement performs the complete GPT proof against freshly captured Boot 1.
+            return;
+        }
+
+        if (state.SchemaVersion < RetirementState.CurrentSchemaVersion)
+        {
+            StateVolumeSafetyValidator.ValidateLegacy(
+                _stateVolumeIsRunningWindows,
+                _allowStateOnSystemVolume);
+            _log.Info("state-store", "Legacy state-location policy passed conservatively.");
+            return;
+        }
+
+        try
+        {
+            StateVolumeSafetyValidator.ValidateExistingSchema2(
+                state,
+                StateVolumeIdentity,
+                _layout.Capture());
+            _log.Info(
+                "state-store",
+                "Schema-v2 state volume is uniquely proven distinct from persisted retiring Boot 1. " +
+                "The running Windows volume and drive letters were not used as rejection identities.");
+        }
+        catch (RetirementStorageException exception)
+        {
+            throw new RetirementStorageException(
+                $"The existing retirement state at '{path}' failed state-volume safety validation: " +
+                exception.Message,
+                exception);
+        }
     }
 
     /// <summary>
@@ -675,6 +784,7 @@ public sealed class RetirementStateStore
         StateFileFoundByScan = true;
         StateVolumeIdentity = found.Volume.ToPartitionIdentity(
             "Volume holding the retirement state file, found by fixed-volume scan");
+        _stateVolumeIsRunningWindows = found.Volume.IsRunningSystemVolume;
 
         return found;
     }
@@ -689,6 +799,14 @@ public sealed class RetirementStateStore
     public void Save(RetirementState state)
     {
         ArgumentNullException.ThrowIfNull(state);
+
+        if (_accessContext == RetirementStateAccessContext.OperatorAbandon &&
+            state.Status != RetirementStatus.Aborted)
+        {
+            throw new RetirementStorageException(
+                "The operator-abandon state store can persist only the terminal ABORTED transition. " +
+                "It cannot create, resume, or advance a retirement operation.");
+        }
 
         state.UpdatedAtUtc = DateTimeOffset.UtcNow;
         var json = JsonSerializer.Serialize(state, JsonOptions);

@@ -90,8 +90,9 @@ internal static class Program
         try
         {
             var options = AppConfiguration.Load();
-            options.AllowStateOnSystemVolume = true;
-            var services = RetirementServices.Create(options, reviewOnly ? "handoff-repair-review" : "handoff-repair");
+            var services = RetirementServices.CreateForExistingOperation(
+                options,
+                reviewOnly ? "handoff-repair-review" : "handoff-repair");
             var state = services.Coordinator.TryLoad();
             var statePath = services.Coordinator.StateFilePath;
             var beforeHash = HashFile(statePath);
@@ -173,8 +174,7 @@ internal static class Program
             var options = AppConfiguration.Load();
             // Read-only preview may load state from the running Boot 2 volume during operator
             // verification. No state file is written in this code path.
-            options.AllowStateOnSystemVolume = true;
-            var services = RetirementServices.Create(options, "resume-preview");
+            var services = RetirementServices.CreateForExistingOperation(options, "resume-preview");
 
             Report($"Retirement state file: {services.Coordinator.StateFilePath}");
             Report($"Log destinations: {string.Join("; ", services.Log.Destinations)}");
@@ -217,7 +217,7 @@ internal static class Program
         {
             var options = AppConfiguration.Load();
             var prefix = request.ReviewOnly ? "hardware-review" : request.DryRun ? "recovery-dryrun" : "recovery";
-            var services = RetirementServices.Create(options, prefix);
+            var services = RetirementServices.CreateForExistingOperation(options, prefix);
 
             Report($"Retirement state file: {services.Coordinator.StateFilePath}");
             Report($"Log destinations: {string.Join("; ", services.Log.Destinations)}");

@@ -185,7 +185,7 @@ public partial class MainForm : Form
         {
             var options = AppConfiguration.Load();
             _restartDelaySeconds = options.RestartDelaySeconds;
-            services = RetirementServices.Create(options, "retire");
+            services = RetirementServices.CreateForNewOperation(options, "retire");
             services.Coordinator.EnsureStorageReady();
         }
         catch (Exception exception) when (
@@ -232,7 +232,7 @@ public partial class MainForm : Form
         try
         {
             var options = AppConfiguration.Load();
-            var services = RetirementServices.Create(options, "startup");
+            var services = RetirementServices.CreateForExistingOperation(options, "startup");
             var state = services.Coordinator.TryCompleteAfterReboot(_layout.Current.Identifier);
             if (state is null)
             {

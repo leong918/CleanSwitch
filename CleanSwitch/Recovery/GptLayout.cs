@@ -67,6 +67,16 @@ public sealed class VolumeLocatorGptLayoutSource : IGptLayoutSource
     public GptLayoutSnapshot Capture()
     {
         var located = VolumeLocator.Enumerate();
+        return BuildSnapshot(located, VolumeLocator.ReadGptTable);
+    }
+
+    internal static GptLayoutSnapshot BuildSnapshot(
+        VolumeLocatorResult located,
+        Func<int, IReadOnlyList<LocatedGptPartition>> readGptTable)
+    {
+        ArgumentNullException.ThrowIfNull(located);
+        ArgumentNullException.ThrowIfNull(readGptTable);
+
         var running = located.Volumes.FirstOrDefault(volume => volume.IsRunningSystemVolume);
         Guid? runningGpt = running?.GptPartitionGuid;
 
@@ -78,18 +88,14 @@ public sealed class VolumeLocatorGptLayoutSource : IGptLayoutSource
             .ToList();
 
         var partitions = new List<LivePartition>();
-        var seen = new HashSet<Guid>();
 
         foreach (var disk in disks)
         {
-            foreach (var row in VolumeLocator.ReadGptTable(disk))
+            foreach (var row in readGptTable(disk))
             {
-                if (!seen.Add(row.GptPartitionId))
-                {
-                    continue;
-                }
-
                 var volume = located.Volumes.FirstOrDefault(candidate =>
+                    candidate.DiskNumber == row.DiskNumber &&
+                    candidate.PartitionNumber == row.PartitionNumber &&
                     candidate.GptPartitionGuid == row.GptPartitionId);
 
                 partitions.Add(new LivePartition
@@ -134,6 +140,8 @@ public sealed class SingleDiskGptLayoutSource : IGptLayoutSource
             .Select(row =>
             {
                 var volume = located.Volumes.FirstOrDefault(candidate =>
+                    candidate.DiskNumber == row.DiskNumber &&
+                    candidate.PartitionNumber == row.PartitionNumber &&
                     candidate.GptPartitionGuid == row.GptPartitionId);
                 return new LivePartition
                 {

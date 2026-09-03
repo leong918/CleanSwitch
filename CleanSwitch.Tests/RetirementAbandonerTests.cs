@@ -39,6 +39,28 @@ public sealed class RetirementAbandonerTests
         Assert.Contains("boot1BcdObjectId", File.ReadAllText(result.ArchivePath), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData(RetirementStatus.Failed)]
+    [InlineData(RetirementStatus.Boot1Retired)]
+    public void Other_supported_operator_cleanup_states_can_be_abandoned(RetirementStatus status)
+    {
+        using var workspace = new TempAbandonWorkspace();
+        var seeded = workspace.SeedTerminal(status, schemaVersion: 2);
+        if (status == RetirementStatus.Boot1Retired)
+        {
+            seeded.DestructiveDeletionPerformed = true;
+            workspace.Coordinator.Persist(seeded);
+        }
+
+        var result = workspace.CreateAbandoner().Execute();
+
+        Assert.Equal(RetirementStatus.Aborted, result.Reloaded.Status);
+        Assert.True(result.Reloaded.IsTerminal);
+        Assert.True(File.Exists(result.ArchivePath));
+        Assert.Equal(status == RetirementStatus.Boot1Retired, result.Reloaded.DestructiveDeletionPerformed);
+        Assert.False(result.Reloaded.BcdDeletionPerformed);
+    }
+
     [Fact]
     public void Archive_is_created_first_and_keeps_the_pending_bytes()
     {
@@ -220,8 +242,8 @@ public sealed class RetirementAbandonerTests
         var archiverSource = ReadRepoFile("CleanSwitch", "Services", "FileRetirementStateArchiver.cs");
         var commandSource = ReadRepoFile("CleanSwitch", "RetirementAbandonCommand.cs");
 
-        Assert.Contains("ConfigureForAbandon(options)", commandSource, StringComparison.Ordinal);
-        Assert.Contains("AllowStateOnSystemVolume = true", commandSource, StringComparison.Ordinal);
+        Assert.Contains("RetirementStateAccessContext.OperatorAbandon", commandSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("AllowStateOnSystemVolume = true", commandSource, StringComparison.Ordinal);
 
         foreach (var source in new[] { abandonerSource, archiverSource, commandSource })
         {
@@ -251,14 +273,9 @@ public sealed class RetirementAbandonerTests
                 StateFileName = "retirement-state-test.json",
                 AllowStateOnSystemVolume = false
             };
-            RetirementAbandonCommand.ConfigureForAbandon(options);
-
             var log = new RecordingOperationLog();
-            var store = new RetirementStateStore(options, log);
-            store.EnsureWritable();
-            var coordinator = new RetirementCoordinator(store, log);
             var created = new DateTimeOffset(2026, 9, 2, 9, 0, 0, TimeSpan.Zero);
-            store.Save(new RetirementState
+            var pending = new RetirementState
             {
                 Operation = RetirementState.RetireBoot1Operation,
                 Status = RetirementStatus.Pending,
@@ -284,7 +301,27 @@ public sealed class RetirementAbandonerTests
                         Reason = "seed"
                     }
                 ]
-            });
+            };
+
+            // Arrange a pre-existing file with a separate test-only writer. The production
+            // operator-abandon context itself is deliberately unable to persist PENDING.
+            var seedStore = new RetirementStateStore(
+                new CleanSwitchOptions
+                {
+                    RecoveryDataPath = folder,
+                    StateFileName = options.StateFileName,
+                    AllowStateOnSystemVolume = true
+                },
+                log);
+            seedStore.Save(pending);
+
+            var store = new RetirementStateStore(
+                options,
+                log,
+                RetirementStateAccessContext.OperatorAbandon);
+            store.EnsureWritable();
+            Assert.Throws<RetirementStorageException>(() => store.Save(pending));
+            var coordinator = new RetirementCoordinator(store, log);
 
             var result = new RetirementAbandoner(coordinator, log).Execute();
 
@@ -312,7 +349,7 @@ public sealed class RetirementAbandonerTests
             };
 
             var exception = Assert.Throws<RetirementStorageException>(() =>
-                RetirementServices.Create(options, "test"));
+                RetirementServices.CreateForNewOperation(options, "test"));
 
             Assert.Contains("being retired", exception.Message, StringComparison.Ordinal);
         }
@@ -323,7 +360,7 @@ public sealed class RetirementAbandonerTests
     }
 
     [Fact]
-    public void System_volume_override_is_scoped_to_abandon_only()
+    public void Operator_abandon_context_is_scoped_and_does_not_enable_appsettings_override()
     {
         var folder = CreateSystemVolumeTestFolder();
         try
@@ -347,11 +384,13 @@ public sealed class RetirementAbandonerTests
                 StateFileName = "retirement-state-test.json",
                 AllowStateOnSystemVolume = false
             };
-            RetirementAbandonCommand.ConfigureForAbandon(abandonOptions);
-            Assert.True(abandonOptions.AllowStateOnSystemVolume);
+            Assert.False(abandonOptions.AllowStateOnSystemVolume);
             Assert.False(defaultOptions.AllowStateOnSystemVolume);
 
-            var store = new RetirementStateStore(abandonOptions, new RecordingOperationLog());
+            var store = new RetirementStateStore(
+                abandonOptions,
+                new RecordingOperationLog(),
+                RetirementStateAccessContext.OperatorAbandon);
             store.EnsureWritable();
         }
         finally

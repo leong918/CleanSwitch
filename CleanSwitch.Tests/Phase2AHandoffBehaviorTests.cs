@@ -2,6 +2,7 @@ using CleanSwitch.Models;
 using CleanSwitch.Recovery;
 using CleanSwitch.Services;
 using CleanSwitch.Tests.Support;
+using CleanSwitch.Tests.Support.Bcd;
 
 namespace CleanSwitch.Tests;
 
@@ -64,6 +65,26 @@ public sealed class Phase2AHandoffBehaviorTests
         Assert.Equal(0, context.BootManager.SetDefaultBootCallCount);
         Assert.Equal(0, context.BootManager.SetNextBootCallCount);
         Assert.False(context.BootManager.RestartCalled);
+    }
+
+    [Fact]
+    public async Task State_location_validation_failure_never_mutates_bcd_disk_or_restarts()
+    {
+        var context = CreateContext(Layout(Boot1, Boot2));
+        context.Coordinator.OnBeginRetirement = () =>
+            throw new RetirementStorageException("state volume identity could not be proven distinct from Boot 1");
+        var disk = new FakeDestructiveDiskCommand();
+        var bcd = new FakeDestructiveBcdCommand();
+
+        await Assert.ThrowsAsync<RetirementStorageException>(() => context.Handoff.ExecuteAsync(context.Layout));
+
+        Assert.Equal(1, context.Coordinator.BeginRetirementCallCount);
+        Assert.Equal(0, context.Coordinator.MarkFailedCallCount);
+        Assert.Equal(0, context.BootManager.SetDefaultBootCallCount);
+        Assert.Equal(0, context.BootManager.SetNextBootCallCount);
+        Assert.False(context.BootManager.RestartCalled);
+        Assert.Equal(0, disk.ExecuteCount);
+        Assert.Equal(0, bcd.ExecuteCount);
     }
 
     [Fact]

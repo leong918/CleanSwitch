@@ -12,16 +12,6 @@ internal static class RetirementAbandonCommand
 {
     public const string Switch = "--abandon-retirement";
 
-    /// <summary>
-    /// Abandon may load and update retirement state on the running system volume during
-    /// operator cleanup. Does not change the persisted appsettings default.
-    /// </summary>
-    internal static void ConfigureForAbandon(CleanSwitchOptions options)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        options.AllowStateOnSystemVolume = true;
-    }
-
     public static int Run(Action<string> report)
     {
         ArgumentNullException.ThrowIfNull(report);
@@ -34,11 +24,13 @@ internal static class RetirementAbandonCommand
         try
         {
             var options = AppConfiguration.Load();
-            ConfigureForAbandon(options);
             var log = FileOperationLog.Create(RetirementStateStore.ResolveLogDirectory(options), "abandon");
             report($"Log destinations: {string.Join("; ", log.Destinations)}");
 
-            var store = new RetirementStateStore(options, log);
+            var store = new RetirementStateStore(
+                options,
+                log,
+                RetirementStateAccessContext.OperatorAbandon);
             var coordinator = new RetirementCoordinator(store, log);
             var abandoner = new RetirementAbandoner(coordinator, log);
             abandoner.Execute(report);

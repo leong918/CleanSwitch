@@ -85,6 +85,10 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
                 "Refusing to continue.");
         }
 
+        // State location is proven against the freshly captured retiring identity before
+        // even reading an old operation and before any state or BCD mutation is reachable.
+        _store.ValidateForNewOperation(boot1Identity);
+
         var existing = _store.TryLoad();
         if (existing is not null && !existing.IsTerminal && existing.Status != RetirementStatus.Failed)
         {

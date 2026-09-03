@@ -17,6 +17,8 @@ internal sealed class FakeRetirementCoordinator : IRetirementCoordinator
 
     public int MarkFailedCallCount { get; private set; }
 
+    public Func<RetirementState>? OnBeginRetirement { get; set; }
+
     public void EnsureStorageReady()
     {
     }
@@ -31,6 +33,11 @@ internal sealed class FakeRetirementCoordinator : IRetirementCoordinator
         PartitionIdentity boot2Identity)
     {
         BeginRetirementCallCount++;
+        if (OnBeginRetirement is not null)
+        {
+            return OnBeginRetirement();
+        }
+
         var now = DateTimeOffset.UtcNow;
         State = new RetirementState
         {

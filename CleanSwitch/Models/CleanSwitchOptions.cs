@@ -52,7 +52,8 @@ public sealed class CleanSwitchOptions
 
     /// <summary>
     /// Test-only escape hatch that permits the state file to sit on the running Windows
-    /// volume. Only ever safe for the non-destructive Phase 2A handoff test.
+    /// volume while constructing a new-operation store. Production configuration must leave
+    /// this false; existing schema-v2 operations use persisted GPT identity validation instead.
     /// </summary>
     public bool AllowStateOnSystemVolume { get; set; }
 

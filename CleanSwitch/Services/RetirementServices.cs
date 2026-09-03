@@ -51,13 +51,26 @@ public sealed class RetirementServices
     public RecoveryRunner RecoveryRunner { get; }
 
     /// <summary>
-    /// Creates the retirement services. The file log is created first so that a failure to
-    /// resolve the state location is itself logged.
+    /// Creates services for a new operation. The file log is created first so that a failure
+    /// to resolve the state location is itself logged.
     /// </summary>
     /// <exception cref="RetirementStorageException">
     /// The configured state location is missing, unusable, or on the volume being retired.
     /// </exception>
-    public static RetirementServices Create(CleanSwitchOptions options, string logPrefix)
+    public static RetirementServices CreateForNewOperation(CleanSwitchOptions options, string logPrefix) =>
+        Create(options, logPrefix, RetirementStateAccessContext.CreateNewOperation);
+
+    /// <summary>
+    /// Creates services for reading or resuming an existing operation. Schema-v2 state-location
+    /// safety is proven against the operation's persisted GPT identities when state is loaded.
+    /// </summary>
+    public static RetirementServices CreateForExistingOperation(CleanSwitchOptions options, string logPrefix) =>
+        Create(options, logPrefix, RetirementStateAccessContext.ExistingOperation);
+
+    private static RetirementServices Create(
+        CleanSwitchOptions options,
+        string logPrefix,
+        RetirementStateAccessContext accessContext)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -67,7 +80,7 @@ public sealed class RetirementServices
         RetirementStateStore store;
         try
         {
-            store = new RetirementStateStore(options, log);
+            store = new RetirementStateStore(options, log, accessContext);
         }
         catch (RetirementStorageException exception)
         {
