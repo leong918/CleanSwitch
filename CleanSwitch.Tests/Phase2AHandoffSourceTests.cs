@@ -35,6 +35,21 @@ public sealed class Phase2AHandoffSourceTests
         Assert.DoesNotContain("Transition(", source, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Repair_review_cli_is_dispatched_and_reports_human_readable_output()
+    {
+        var program = File.ReadAllText(FindSource(string.Empty, "Program.cs"));
+        var project = File.ReadAllText(FindSource(string.Empty, "CleanSwitch.csproj"));
+
+        Assert.Contains("--repair-pending-handoff-review", program, StringComparison.Ordinal);
+        Assert.Contains("RunPendingHandoffRepair(repairPendingHandoffReview", program, StringComparison.Ordinal);
+        Assert.Contains("Report(result.Describe(reviewOnly))", program, StringComparison.Ordinal);
+        Assert.Contains("State SHA256 before:", program, StringComparison.Ordinal);
+        Assert.Contains("State SHA256 after :", program, StringComparison.Ordinal);
+        Assert.Contains("<PublishSingleFile>true</PublishSingleFile>", project, StringComparison.Ordinal);
+        Assert.Contains("<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>", project, StringComparison.Ordinal);
+    }
+
     private static string FindMainForm()
         => FindSource(string.Empty, "MainForm.cs");
 

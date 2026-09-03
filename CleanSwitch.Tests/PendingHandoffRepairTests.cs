@@ -20,6 +20,12 @@ public sealed class PendingHandoffRepairTests
         Assert.False(result.MutationPerformed);
         Assert.Equal(0, context.BootManager.SetDefaultBootCallCount);
         Assert.Equal($"bcdedit.exe /default {BcdIdentifiers.Format(BcdFixtures.Boot2)}", result.Command);
+        var output = result.Describe(reviewOnly: true);
+        Assert.False(string.IsNullOrWhiteSpace(output));
+        Assert.Contains("REVIEW ONLY (read-only)", output, StringComparison.Ordinal);
+        Assert.Contains("Current default:", output, StringComparison.Ordinal);
+        Assert.Contains("Only permitted command:", output, StringComparison.Ordinal);
+        Assert.Contains("Validation: PASS", output, StringComparison.Ordinal);
     }
 
     [Fact]
