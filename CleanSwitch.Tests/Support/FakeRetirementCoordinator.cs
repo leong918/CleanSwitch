@@ -13,6 +13,10 @@ internal sealed class FakeRetirementCoordinator : IRetirementCoordinator
 
     public RetirementState? LastRetired { get; private set; }
 
+    public int BeginRetirementCallCount { get; private set; }
+
+    public int MarkFailedCallCount { get; private set; }
+
     public void EnsureStorageReady()
     {
     }
@@ -24,8 +28,37 @@ internal sealed class FakeRetirementCoordinator : IRetirementCoordinator
         string boot2Id,
         string recoveryId,
         PartitionIdentity boot1Identity,
-        PartitionIdentity boot2Identity) =>
-        throw new NotSupportedException();
+        PartitionIdentity boot2Identity)
+    {
+        BeginRetirementCallCount++;
+        var now = DateTimeOffset.UtcNow;
+        State = new RetirementState
+        {
+            Status = RetirementStatus.Pending,
+            SchemaVersion = RetirementState.CurrentSchemaVersion,
+            Phase = "2B-identify",
+            Boot1Id = boot1Id,
+            Boot2Id = boot2Id,
+            RecoveryId = recoveryId,
+            Boot1BcdObjectId = boot1Id,
+            Boot2BcdObjectId = boot2Id,
+            Boot1Identity = boot1Identity,
+            Boot2Identity = boot2Identity,
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now,
+            Transitions =
+            [
+                new RetirementTransition
+                {
+                    From = RetirementStatus.Pending,
+                    To = RetirementStatus.Pending,
+                    AtUtc = now,
+                    Reason = "Fake Phase 2A operation created."
+                }
+            ]
+        };
+        return State;
+    }
 
     public RetirementState Transition(RetirementState state, RetirementStatus target, string reason)
     {
@@ -43,8 +76,18 @@ internal sealed class FakeRetirementCoordinator : IRetirementCoordinator
 
     public RetirementState MarkFailed(RetirementState state, string error)
     {
+        MarkFailedCallCount++;
         LastFailed = state;
+        var from = state.Status;
         state.Status = RetirementStatus.Failed;
+        state.LastError = error;
+        state.Transitions.Add(new RetirementTransition
+        {
+            From = from,
+            To = RetirementStatus.Failed,
+            AtUtc = DateTimeOffset.UtcNow,
+            Reason = error
+        });
         return state;
     }
 

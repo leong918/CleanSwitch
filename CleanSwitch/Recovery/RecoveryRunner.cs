@@ -28,10 +28,9 @@ public sealed record RecoveryRunResult(RecoveryRunOutcome Outcome, string Messag
 /// <summary>
 /// Recovery-side retirement flow.
 /// <para>
-/// Live disk deletion is compiled in <see cref="DestructiveRetirementEngine"/> but is not
-/// reached while <c>DestructiveOperationsImplemented</c> is false.
-/// Phase 2C BCD deletion is compiled in <see cref="DestructiveBcdRetirementEngine"/> but
-/// is not called from this runner while <c>BcdOperationsImplemented</c> is false.
+/// Live disk and BCD deletion are available only when their compile-time profile gates
+/// are enabled. Safe builds keep both gates false; the explicit live-test profile enables
+/// them while preserving every runtime and identity guard.
 /// <c>--recovery-run</c> without <c>--execute-deletion</c> skips deletion and hands
 /// off to Boot 2. <c>--recovery-review</c> never starts a disk or BCD delete command.
 /// </para>

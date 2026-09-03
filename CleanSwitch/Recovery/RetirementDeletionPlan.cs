@@ -28,8 +28,8 @@ public sealed class RetirementDeletionPlan
     public bool TargetIdentified { get; init; }
 
     /// <summary>
-    /// True only when every safety guard would allow live deletion. False in this build
-    /// because <c>DestructiveOperationsImplemented</c> is hard-coded off.
+    /// True only when every safety guard would allow live deletion, including an enabled
+    /// <c>DestructiveOperationsImplemented</c> compile-time profile gate.
     /// </summary>
     public bool ExecutionAuthorised { get; init; }
 

@@ -5,9 +5,9 @@ public sealed class Phase2AHandoffSourceTests
     [Fact]
     public void Retire_handoff_sets_survivor_default_before_one_time_recovery_boot()
     {
-        var source = File.ReadAllText(FindMainForm());
+        var source = File.ReadAllText(FindSource("Services", "Phase2AHandoff.cs"));
         var setDefault = source.IndexOf(
-            "SetDefaultBootAsync(boot2.Identifier)",
+            "SetDefaultBootAsync(layout.Target.Identifier)",
             StringComparison.Ordinal);
         var setRecovery = source.IndexOf(
             "SetNextBootAsync(recovery.Identifier)",
@@ -49,9 +49,6 @@ public sealed class Phase2AHandoffSourceTests
         Assert.Contains("<PublishSingleFile>true</PublishSingleFile>", project, StringComparison.Ordinal);
         Assert.Contains("<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>", project, StringComparison.Ordinal);
     }
-
-    private static string FindMainForm()
-        => FindSource(string.Empty, "MainForm.cs");
 
     private static string FindSource(string folder, string fileName)
     {

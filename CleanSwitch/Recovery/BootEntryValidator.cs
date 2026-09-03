@@ -6,6 +6,13 @@ namespace CleanSwitch.Recovery;
 /// <summary>Result of resolving the WinRE boot entry.</summary>
 public sealed record RecoveryEntryResolution(string? Identifier, BcdEntry? Entry, ValidationReport Report);
 
+public interface IBootEntryValidator
+{
+    Task<RecoveryEntryResolution> ResolveRecoveryEntryAsync(string? configuredGuid);
+
+    Task<PartitionIdentity?> TryDescribeBootEntryVolumeAsync(string bootGuid);
+}
+
 /// <summary>
 /// Validates BCD entries used by the retirement flow: the WinRE entry the handoff boots
 /// into, and the Boot 2 entry the PC must land on afterwards.
@@ -16,7 +23,7 @@ public sealed record RecoveryEntryResolution(string? Identifier, BcdEntry? Entry
 /// full <c>bcdedit /enum all /v</c> object graph instead.
 /// </para>
 /// </summary>
-public sealed class BootEntryValidator
+public sealed class BootEntryValidator : IBootEntryValidator
 {
     private readonly IBootManager _bootManager;
     private readonly IOperationLog _log;

@@ -4,9 +4,9 @@ using CleanSwitch.Services;
 namespace CleanSwitch.Recovery;
 
 /// <summary>
-/// Live deletion engine. Production always constructs this with
-/// <paramref name="destructiveOperationsImplemented"/> false. Tests may pass true
-/// together with a fake disk command so no real disk is touched.
+/// Live deletion engine. The caller supplies the compile-time profile gate. Safe builds
+/// pass false; the explicit live-test profile passes true and still requires runtime opt-in,
+/// enabled configuration, and complete identity validation.
 /// </summary>
 public sealed class DestructiveRetirementEngine
 {

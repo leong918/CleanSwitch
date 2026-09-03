@@ -17,6 +17,7 @@ public sealed class RetirementServices
         IRetirementCoordinator coordinator,
         DiskValidator diskValidator,
         BootEntryValidator bootEntryValidator,
+        Phase2AHandoff phase2AHandoff,
         RetirementExecutor executor,
         RecoveryRunner recoveryRunner)
     {
@@ -26,6 +27,7 @@ public sealed class RetirementServices
         Coordinator = coordinator;
         DiskValidator = diskValidator;
         BootEntryValidator = bootEntryValidator;
+        Phase2AHandoff = phase2AHandoff;
         Executor = executor;
         RecoveryRunner = recoveryRunner;
     }
@@ -41,6 +43,8 @@ public sealed class RetirementServices
     public DiskValidator DiskValidator { get; }
 
     public BootEntryValidator BootEntryValidator { get; }
+
+    public Phase2AHandoff Phase2AHandoff { get; }
 
     public RetirementExecutor Executor { get; }
 
@@ -77,6 +81,7 @@ public sealed class RetirementServices
         var coordinator = new RetirementCoordinator(store, log);
         var diskValidator = new DiskValidator(log);
         var bootEntryValidator = new BootEntryValidator(bootManager, log);
+        var phase2AHandoff = new Phase2AHandoff(options, bootManager, coordinator, bootEntryValidator, log);
         var layout = new VolumeLocatorGptLayoutSource();
         var bcdStore = new BootManagerBcdStoreSource(bootManager);
         var executor = new RetirementExecutor(
@@ -105,6 +110,7 @@ public sealed class RetirementServices
             coordinator,
             diskValidator,
             bootEntryValidator,
+            phase2AHandoff,
             executor,
             recoveryRunner);
     }

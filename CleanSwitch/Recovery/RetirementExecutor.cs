@@ -20,12 +20,12 @@ public sealed class RetirementNotImplementedException : Exception
 /// The only place that may remove Boot 1.
 /// <para>
 /// Live deletion is compiled in <see cref="DestructiveRetirementEngine"/> but is
-/// unreachable until every guard is true. This build keeps
-/// <see cref="DestructiveOperationsImplemented"/> false, so
-/// <see cref="RetireBoot1Async"/> throws before the engine starts a disk command.
+/// unreachable until every guard is true. Safe builds compile the implementation gates
+/// off; the explicit live-test build profile compiles them on for controlled integration
+/// and authorized real-machine testing.
 /// </para>
 /// Guards, all required:
-///   1. <see cref="DestructiveOperationsImplemented"/> (hard-coded; false in this build)
+///   1. <see cref="DestructiveOperationsImplemented"/> (compile-time profile gate)
 ///   2. <c>explicitOptIn</c> from the caller (<c>--execute-deletion</c>)
 ///   3. <c>CleanSwitch:EnableDestructiveRetirement</c> in appsettings.json
 ///   4. <c>validation.Passed</c>

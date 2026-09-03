@@ -17,3 +17,6 @@ ssh/id_ed25519
 /artifacts/
 /publish/
 CleanSwitch-*-win-x64.zip
+
+# Test runner output is generated evidence, not source.
+**/TestResults/

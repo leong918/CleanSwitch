@@ -11,7 +11,7 @@ namespace CleanSwitch.Tests;
 public sealed class RetirementAbandonerTests
 {
     public const string ExpectedSupersedeReason =
-        "Operator superseded stale schema-v1 PENDING operation so a fresh schema-v2 retirement state can be captured.";
+        "Operator abandoned a stale PENDING retirement operation so a fresh retirement state can be captured.";
 
     [Fact]
     public void Pending_schema_v1_can_be_explicitly_abandoned()

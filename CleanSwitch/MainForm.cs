@@ -42,9 +42,20 @@ public partial class MainForm : Form
             currentValueLabel.Text = _layout.Current.Description;
             targetValueLabel.Text = _layout.Target.Description;
             switchButton.Text = $"Switch to {_layout.Target.Description}";
-            statusLabel.Text = "Ready.";
             switchButton.Enabled = true;
-            retireButton.Enabled = true;
+
+            try
+            {
+                Phase2ARetirementGuard.Validate(_layout, options.Boot2Guid);
+                statusLabel.Text = "Ready.";
+                retireButton.Enabled = true;
+            }
+            catch (InvalidOperationException exception)
+            {
+                retireButton.Enabled = false;
+                statusLabel.Text = exception.Message;
+                statusLabel.ForeColor = Color.FromArgb(160, 40, 40);
+            }
         }
         catch (Exception exception) when (exception is BootManagerException or InvalidOperationException or JsonException)
         {
@@ -116,7 +127,7 @@ public partial class MainForm : Form
     /// <summary>
     /// Starts the Boot 1 retirement handoff: record PENDING state, point the next boot at
     /// the recovery environment, restart. Nothing is deleted here or in Phase 2A at all.
-    /// Any failure before the restart leaves the PC exactly as it was.
+    /// Any failure prevents Phase 2B and is recorded after PENDING exists.
     /// </summary>
     private async void RetireButton_Click(object? sender, EventArgs e)
     {
@@ -131,6 +142,17 @@ public partial class MainForm : Form
 
         var boot1 = _layout.Current;
         var boot2 = _layout.Target;
+
+        try
+        {
+            var guardOptions = AppConfiguration.Load();
+            Phase2ARetirementGuard.Validate(_layout, guardOptions.Boot2Guid);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or JsonException)
+        {
+            ShowRetireError(exception.Message);
+            return;
+        }
 
         var continueButton = new TaskDialogButton("Continue");
         var page = new TaskDialogPage
@@ -173,103 +195,26 @@ public partial class MainForm : Form
             return;
         }
 
-        RetirementState? state = null;
         try
         {
-            var recovery = await services.BootEntryValidator.ResolveRecoveryEntryAsync(services.Options.RecoveryGuid);
-            if (recovery.Identifier is null)
+            await services.Phase2AHandoff.ExecuteAsync(_layout, stage =>
             {
-                ShowRetireError(
-                    "The Windows Recovery Environment boot entry could not be validated, so nothing was " +
-                    "changed and the PC will not restart." + Environment.NewLine + Environment.NewLine +
-                    recovery.Report.Describe() + Environment.NewLine + Environment.NewLine +
-                    "Find the recovery identifier with 'bcdedit /enum all /v' from an elevated prompt and set " +
-                    "CleanSwitch:RecoveryGuid in appsettings.json.");
-                return;
-            }
-
-            statusLabel.Text = "Recording Boot 1 and Boot 2 partition identities...";
-            Refresh();
-
-            var boot1Identity = await services.BootEntryValidator.TryDescribeBootEntryVolumeAsync(boot1.Identifier);
-            var boot2Identity = await services.BootEntryValidator.TryDescribeBootEntryVolumeAsync(boot2.Identifier);
-            if (boot1Identity is null || boot2Identity is null)
-            {
-                ShowRetireError(
-                    "Boot 1 or Boot 2 partition identity could not be recorded from the partition table, so nothing was " +
-                    "changed and the PC will not restart." + Environment.NewLine + Environment.NewLine +
-                    $"Boot 1: {boot1Identity?.Describe() ?? "No identity returned."}{Environment.NewLine}" +
-                    $"Boot 2: {boot2Identity?.Describe() ?? "No identity returned."}");
-                return;
-            }
-
-            RetirementStateIdentityRequirements.ValidateForNewPending(
-                boot1.Identifier,
-                boot2.Identifier,
-                boot1Identity,
-                boot2Identity);
-
-            services.Log.Info(
-                "retire-ui",
-                $"Boot 1 identity: {boot1Identity.Describe()}");
-            services.Log.Info(
-                "retire-ui",
-                $"Boot 2 identity: {boot2Identity.Describe()}");
-
-            state = services.Coordinator.BeginRetirement(
-                boot1.Identifier,
-                boot2.Identifier,
-                recovery.Identifier,
-                boot1Identity,
-                boot2Identity);
-
-            statusLabel.Text = "Setting Boot 2 as the surviving default...";
-            Refresh();
-
-            await services.BootManager.SetDefaultBootAsync(boot2.Identifier);
-
-            statusLabel.Text = "Setting the recovery environment as the next boot...";
-            Refresh();
-
-            await services.BootManager.SetNextBootAsync(recovery.Identifier);
-
-            statusLabel.Text = $"Restarting into the recovery environment in {_restartDelaySeconds} second(s)...";
-            Refresh();
-
-            await services.BootManager.RestartAsync(_restartDelaySeconds);
+                statusLabel.Text = stage;
+                Refresh();
+            });
         }
         catch (Exception exception) when (
             exception is BootManagerException or RetirementStateException or RetirementStorageException
                 or InvalidOperationException or JsonException)
         {
-            RecordRetireFailure(services, state, exception.Message);
+            services.Log.Warn("retire-ui", $"Retirement handoff failed closed: {exception.Message}");
             ShowRetireError(exception.Message);
         }
         catch (Exception exception)
         {
-            RecordRetireFailure(services, state, exception.Message);
+            services.Log.Warn("retire-ui", $"Unexpected retirement handoff failure: {exception.Message}");
             ShowRetireError(
                 $"An unexpected error occurred while preparing the retirement handoff.{Environment.NewLine}{exception.Message}");
-        }
-    }
-
-    private static void RecordRetireFailure(RetirementServices services, RetirementState? state, string error)
-    {
-        services.Log.Warn("retire-ui", $"Retirement handoff aborted before restart: {error}");
-
-        if (state is null)
-        {
-            return;
-        }
-
-        try
-        {
-            services.Coordinator.MarkFailed(state, error);
-        }
-        catch (Exception exception) when (
-            exception is RetirementStorageException or RetirementStateException)
-        {
-            services.Log.Warn("retire-ui", $"Could not record the failure in the state file: {exception.Message}");
         }
     }
 

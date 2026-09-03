@@ -13,7 +13,7 @@ namespace CleanSwitch.Services;
 public sealed class RetirementAbandoner
 {
     public const string DefaultSupersedeReason =
-        "Operator superseded stale schema-v1 PENDING operation so a fresh schema-v2 retirement state can be captured.";
+        "Operator abandoned a stale PENDING retirement operation so a fresh retirement state can be captured.";
 
     private readonly IRetirementCoordinator _coordinator;
     private readonly IRetirementStateArchiver _archiver;
