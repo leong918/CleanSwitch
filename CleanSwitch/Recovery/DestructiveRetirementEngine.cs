@@ -13,7 +13,7 @@ public sealed class DestructiveRetirementEngine
     private readonly IGptLayoutSource _layout;
     private readonly IDestructiveDiskCommand _command;
     private readonly IOperationLog _log;
-    private readonly IRetirementIdentitySet _identities;
+    private readonly IRetirementIdentitySet? _identities;
     private readonly bool _implemented;
     private readonly bool _configEnabled;
 
@@ -29,7 +29,7 @@ public sealed class DestructiveRetirementEngine
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _command = command ?? throw new ArgumentNullException(nameof(command));
         _log = log ?? NullOperationLog.Instance;
-        _identities = identities ?? PinnedRetirementIdentitySet.Instance;
+        _identities = identities;
         _implemented = destructiveOperationsImplemented;
         _configEnabled = options.EnableDestructiveRetirement;
     }
@@ -86,7 +86,9 @@ public sealed class DestructiveRetirementEngine
                 exception);
         }
 
-        var resolved = DestructiveTargetResolver.Resolve(expectedBoot1, expectedBoot2, before, _identities);
+        var identities = _identities ??
+                         RetirementIdentitySet.FromPersistedOperation(expectedBoot1, expectedBoot2, before);
+        var resolved = DestructiveTargetResolver.Resolve(expectedBoot1, expectedBoot2, before, identities);
         _log.Info("resolver", resolved.Report.Describe());
 
         if (!resolved.Passed || resolved.Target is null)
@@ -145,8 +147,8 @@ public sealed class DestructiveRetirementEngine
 
         var verify = DestructiveTargetResolver.VerifyAfterDelete(
             resolved.Target.TargetGptId,
-            _identities.Boot2GptId,
-            _identities.ProtectedGptIds,
+            identities.Boot2GptId,
+            identities.ProtectedGptIds,
             before,
             after);
         _log.Info("executor", verify.Describe());

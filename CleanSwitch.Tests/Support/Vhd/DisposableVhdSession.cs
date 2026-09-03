@@ -8,10 +8,13 @@ internal sealed class DisposableVhdSession : IDisposable
 {
     private bool _attached;
     private bool _disposed;
+    private readonly Action<string>? _diagnostic;
+    private VirtDiskNative.VirtualDiskAttachment? _attachment;
 
-    private DisposableVhdSession(string vhdxPath)
+    private DisposableVhdSession(string vhdxPath, Action<string>? diagnostic)
     {
         VhdxPath = vhdxPath;
+        _diagnostic = diagnostic;
     }
 
     public string VhdxPath { get; }
@@ -33,6 +36,9 @@ internal sealed class DisposableVhdSession : IDisposable
     public LivePartition Boot2Recovery { get; private set; } = null!;
 
     public VirtualDiskProof Proof { get; private set; } = null!;
+
+    internal VirtDiskNative.VirtualDiskAttachment Attachment =>
+        _attachment ?? throw new InvalidOperationException("VHD attachment handle is unavailable. Refusing proof.");
 
     public RetirementIdentitySet Identities => new()
     {
@@ -63,7 +69,7 @@ internal sealed class DisposableVhdSession : IDisposable
         Boot2Recovery
     ];
 
-    public static DisposableVhdSession Create()
+    public static DisposableVhdSession Create(Action<string>? diagnostic = null)
     {
         if (!IsAdministrator())
         {
@@ -72,7 +78,11 @@ internal sealed class DisposableVhdSession : IDisposable
         }
 
         var session = new DisposableVhdSession(
-            Path.Combine(Path.GetTempPath(), $"cleanswitch-vhd-{Guid.NewGuid():N}.vhdx"));
+            Path.Combine(Path.GetTempPath(), $"cleanswitch-vhd-{Guid.NewGuid():N}.vhdx"),
+            diagnostic);
+        session.Trace(
+            $"Disposable VHD lifecycle begin path='{session.VhdxPath}' pid={Environment.ProcessId}. " +
+            "No managed FileStream creates the VHDX; DiskPart owns creation/attach and is awaited.");
         try
         {
             session.CreateAndAttach();
@@ -94,7 +104,7 @@ internal sealed class DisposableVhdSession : IDisposable
     }
 
     public VirtualDiskProof Reprove() =>
-        VirtualDiskProofVerifier.Prove(VhdxPath, DiskNumber);
+        VirtualDiskProofVerifier.Prove(VhdxPath, DiskNumber, _diagnostic, Attachment);
 
     public GptLayoutSnapshot CaptureLayout() =>
         new SingleDiskGptLayoutSource(DiskNumber).Capture();
@@ -107,6 +117,7 @@ internal sealed class DisposableVhdSession : IDisposable
         }
 
         _disposed = true;
+        Trace($"Cleanup begin path='{VhdxPath}' attached={_attached}.");
         try
         {
             if (_attached || File.Exists(VhdxPath))
@@ -117,18 +128,22 @@ internal sealed class DisposableVhdSession : IDisposable
         finally
         {
             TryDeleteFile();
+            Trace($"Cleanup complete path='{VhdxPath}' exists={File.Exists(VhdxPath)}.");
         }
     }
 
     private void CreateAndAttach()
     {
+        Trace($"Creating unique VHDX path='{VhdxPath}' with DiskPart; no attach is requested here.");
         DiskpartScriptRunner.Run(
         [
-            $"create vdisk file=\"{VhdxPath}\" maximum=4096 type=expandable",
-            $"select vdisk file=\"{VhdxPath}\"",
-            "attach vdisk"
-        ]);
+            $"create vdisk file=\"{VhdxPath}\" maximum=4096 type=expandable"
+        ], _diagnostic);
+        Trace("DiskPart creation process exited; its VHDX, process, and script handles are closed.");
+
+        _attachment = VirtDiskNative.Attach(VhdxPath, _diagnostic);
         _attached = true;
+        Trace("Virtual Disk API attachment handle is retained by the session.");
     }
 
     private VirtualDiskProof WaitForProof()
@@ -138,7 +153,10 @@ internal sealed class DisposableVhdSession : IDisposable
         {
             try
             {
-                return VirtualDiskProofVerifier.Prove(VhdxPath);
+                return VirtualDiskProofVerifier.Prove(
+                    VhdxPath,
+                    diagnostic: _diagnostic,
+                    attachment: Attachment);
             }
             catch (Exception exception)
             {
@@ -209,7 +227,11 @@ internal sealed class DisposableVhdSession : IDisposable
 
     private void RefreshProof()
     {
-        Proof = VirtualDiskProofVerifier.Prove(VhdxPath, DiskNumber == 0 ? null : DiskNumber);
+        Proof = VirtualDiskProofVerifier.Prove(
+            VhdxPath,
+            DiskNumber == 0 ? null : DiskNumber,
+            _diagnostic,
+            Attachment);
         DiskNumber = Proof.DiskNumber;
     }
 
@@ -315,11 +337,9 @@ internal sealed class DisposableVhdSession : IDisposable
     {
         try
         {
-            DiskpartScriptRunner.Run(
-            [
-                $"select vdisk file=\"{VhdxPath}\"",
-                "detach vdisk"
-            ]);
+            Trace($"Detaching VHDX path='{VhdxPath}' through the retained Virtual Disk API handle.");
+            _attachment?.Dispose();
+            _attachment = null;
         }
         catch (Exception)
         {
@@ -341,6 +361,7 @@ internal sealed class DisposableVhdSession : IDisposable
                     File.Delete(VhdxPath);
                 }
 
+                Trace($"Temporary VHDX deleted path='{VhdxPath}' attempt={attempt + 1}.");
                 return;
             }
             catch (IOException)
@@ -364,6 +385,8 @@ internal sealed class DisposableVhdSession : IDisposable
                 : VolumeLocator.FormatGptId(part.PartitionType.Value),
             Source = source
         };
+
+    private void Trace(string message) => _diagnostic?.Invoke(message);
 
     private static bool IsAdministrator()
     {

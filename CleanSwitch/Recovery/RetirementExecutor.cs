@@ -29,8 +29,8 @@ public sealed class RetirementNotImplementedException : Exception
 ///   2. <c>explicitOptIn</c> from the caller (<c>--execute-deletion</c>)
 ///   3. <c>CleanSwitch:EnableDestructiveRetirement</c> in appsettings.json
 ///   4. <c>validation.Passed</c>
-///   5. Re-resolved target is the pinned Boot 1 identity (disk 0 / partition 3 / GPT)
-///   6. Boot 2 is still the pinned Boot 2 identity
+///   5. Re-resolved target exactly matches the schema-v2 PENDING Boot 1 identity
+///   6. Boot 2 still exactly matches the schema-v2 PENDING survivor identity
 /// </summary>
 public sealed class RetirementExecutor
 {
@@ -63,8 +63,7 @@ public sealed class RetirementExecutor
             _layout,
             diskCommand ?? new DiskpartDestructiveDiskCommand(_log),
             _log,
-            DestructiveOperationsImplemented,
-            PinnedRetirementIdentitySet.Instance);
+            DestructiveOperationsImplemented);
         _bcdEngine = new DestructiveBcdRetirementEngine(
             bcdStore ?? new BootManagerBcdStoreSource(bootManager ?? new WindowsBootManager(_log)),
             bcdCommand ?? new BcdeditDestructiveBcdCommand(_log),
@@ -108,11 +107,6 @@ public sealed class RetirementExecutor
         if (!IdentifiersAgree(expectedBoot1, observedBoot1, out var mismatch))
         {
             return Incomplete(mismatch, guards, boot1BcdId, boot2?.GptPartitionId);
-        }
-
-        if (!MatchesPinnedBoot1(expectedBoot1, out var expectedPinError))
-        {
-            return Incomplete(expectedPinError, guards, boot1BcdId, boot2?.GptPartitionId);
         }
 
         if (observedBoot1.DiskNumber is null || observedBoot1.PartitionNumber is null ||
@@ -168,25 +162,6 @@ public sealed class RetirementExecutor
                 boot2?.GptPartitionId);
         }
 
-        if (!PinnedRetirementTargets.IsPinnedBoot1(disk, partition, gptId))
-        {
-            return Incomplete(
-                $"Live volume disk {disk} partition {partition} GPT {VolumeLocator.FormatGptId(gptId)} " +
-                $"is not the pinned Boot 1 target ({PinnedRetirementTargets.DescribeBoot1()}).",
-                guards,
-                boot1BcdId,
-                boot2?.GptPartitionId);
-        }
-
-        if (PinnedRetirementTargets.IsProtectedPartition(disk, partition))
-        {
-            return Incomplete(
-                $"Disk {disk} partition {partition} is a protected partition (ESP, MSR, Recovery, or Boot 2).",
-                guards,
-                boot1BcdId,
-                boot2?.GptPartitionId);
-        }
-
         GptPartitionTypes.TryParse(
             live.PartitionType is null ? observedBoot1.GptPartitionType : VolumeLocator.FormatGptId(live.PartitionType.Value),
             out var liveType);
@@ -209,11 +184,6 @@ public sealed class RetirementExecutor
                 guards,
                 boot1BcdId,
                 boot2?.GptPartitionId);
-        }
-
-        if (boot2 is not null && !MatchesPinnedBoot2(boot2, out var boot2PinError))
-        {
-            return Incomplete(boot2PinError, guards, boot1BcdId, boot2.GptPartitionId);
         }
 
         if (boot2?.GptPartitionId is not null &&
@@ -281,7 +251,7 @@ public sealed class RetirementExecutor
                     Name = "confirm-gone",
                     Description =
                         $"Re-enumerate. GPT {gpt} must be absent. Boot 2 GPT " +
-                        $"{boot2?.GptPartitionId ?? PinnedRetirementTargets.Boot2Gpt} must still be unique.",
+                        $"{boot2?.GptPartitionId ?? "(missing from operation)"} must still be unique.",
                     IsDestructive = false
                 }
             ]
@@ -368,17 +338,7 @@ public sealed class RetirementExecutor
         ArgumentNullException.ThrowIfNull(expectedBoot1);
         ArgumentNullException.ThrowIfNull(boot2);
 
-        if (!MatchesPinnedBoot1(expectedBoot1, out var boot1Error))
-        {
-            throw new RetirementExecutionException(boot1Error);
-        }
-
-        if (!MatchesPinnedBoot2(boot2, out var boot2Error))
-        {
-            throw new RetirementExecutionException(boot2Error);
-        }
-
-        var snapshot = ReadPinnedSnapshot();
+        var snapshot = ReadOperationSnapshot(expectedBoot1, boot2);
         if (snapshot.Boot2Count != 1)
         {
             throw new RetirementExecutionException(
@@ -426,12 +386,17 @@ public sealed class RetirementExecutor
         };
     }
 
-    /// <summary>Read-only presence of the pinned Boot 1 / Boot 2 GPT ids.</summary>
-    public PinnedVolumeSnapshot ReadPinnedSnapshot()
+    /// <summary>Read-only presence of this operation's persisted Boot 1 / Boot 2 GPT ids.</summary>
+    public PinnedVolumeSnapshot ReadOperationSnapshot(PartitionIdentity boot1Identity, PartitionIdentity boot2Identity)
     {
+        if (!boot1Identity.TryGetGptId(out var boot1Gpt) || !boot2Identity.TryGetGptId(out var boot2Gpt))
+        {
+            throw new RetirementExecutionException("Boot 1 or Boot 2 persisted GPT identity is invalid.");
+        }
+
         var live = _layout.Capture();
-        var boot1 = live.WithGptId(PinnedRetirementTargets.Boot1GptId);
-        var boot2 = live.WithGptId(PinnedRetirementTargets.Boot2GptId);
+        var boot1 = live.WithGptId(boot1Gpt);
+        var boot2 = live.WithGptId(boot2Gpt);
         return new PinnedVolumeSnapshot(boot1.Count, boot2.Count, null, null);
     }
 
@@ -445,20 +410,15 @@ public sealed class RetirementExecutor
         text.AppendLine();
         text.AppendLine("Exact command (only after every guard passes):");
         text.AppendLine("  diskpart.exe /s <WinRE temp>\\cleanswitch-retire-boot1.txt");
-        text.AppendLine("Script contents (numbers are re-resolved from GPT, then pinned):");
-        text.AppendLine($"  select disk {PinnedRetirementTargets.Boot1Disk}");
-        text.AppendLine($"  select partition {PinnedRetirementTargets.Boot1Partition}");
+        text.AppendLine("Script contents (numbers are re-resolved from the persisted GPT identity):");
+        text.AppendLine("  select disk <operation Boot 1 live disk>");
+        text.AppendLine("  select partition <operation Boot 1 live partition>");
         text.AppendLine("  delete partition override");
         text.AppendLine("Drive letters are never written into the script.");
         text.AppendLine();
-        text.AppendLine("Pinned target (must match state file AND live GPT lookup):");
-        text.AppendLine("  " + PinnedRetirementTargets.DescribeBoot1());
-        text.AppendLine("Pinned preserve:");
-        text.AppendLine("  " + PinnedRetirementTargets.DescribeBoot2());
-        text.AppendLine($"  ESP  disk {PinnedRetirementTargets.EfiDisk} partition {PinnedRetirementTargets.EfiPartition} {PinnedRetirementTargets.EfiGpt}");
-        text.AppendLine($"  MSR  disk {PinnedRetirementTargets.MsrDisk} partition {PinnedRetirementTargets.MsrPartition}");
-        text.AppendLine($"  Boot 1 WinRE disk {PinnedRetirementTargets.Boot1WinReDisk} partition {PinnedRetirementTargets.Boot1WinRePartition} {PinnedRetirementTargets.Boot1WinReGpt}");
-        text.AppendLine($"  Boot 2 WinRE disk {PinnedRetirementTargets.Boot2WinReDisk} partition {PinnedRetirementTargets.Boot2WinRePartition} {PinnedRetirementTargets.Boot2WinReGpt}");
+        text.AppendLine("Operation target: schema-v2 Boot 1 identity must match the live GPT lookup exactly.");
+        text.AppendLine("Operation survivor: schema-v2 Boot 2 identity must remain unique and unchanged.");
+        text.AppendLine("All non-target live GPT identities are preserved; ESP/MSR/Recovery type guards also fail closed.");
         text.AppendLine("  Boot 1 BCD loader - Phase 2C compiled, BcdOperationsImplemented=false, not deleted");
         text.AppendLine("  Boot 2 is not moved or extended. Freed space stays unallocated.");
         text.AppendLine();
@@ -468,7 +428,7 @@ public sealed class RetirementExecutor
             text.AppendLine("  " + line);
         }
 
-        text.AppendLine($"  target is pinned Boot 1          (disk {PinnedRetirementTargets.Boot1Disk} / partition {PinnedRetirementTargets.Boot1Partition} / {PinnedRetirementTargets.Boot1Gpt})");
+        text.AppendLine("  target matches the accepted schema-v2 operation identity and live GPT geometry");
         text.AppendLine("  target is not Boot 2, ESP, MSR, Recovery, or the running WinRE volume");
         text.AppendLine("  destructiveDeletionPerformed is false (otherwise diskpart is skipped)");
         text.AppendLine();
@@ -556,48 +516,6 @@ public sealed class RetirementExecutor
             Boot2GptPartitionId = boot2Gpt,
             GuardLines = guards
         };
-
-    private static bool MatchesPinnedBoot1(PartitionIdentity identity, out string error)
-    {
-        error = string.Empty;
-        if (identity.DiskNumber is not int disk || identity.PartitionNumber is not int partition ||
-            !VolumeLocator.TryParseGptId(identity.GptPartitionId, out var gpt))
-        {
-            error = "Boot 1 identity is missing disk, partition, or GPT unique id.";
-            return false;
-        }
-
-        if (!PinnedRetirementTargets.IsPinnedBoot1(disk, partition, gpt))
-        {
-            error =
-                $"Recorded Boot 1 is disk {disk} partition {partition} GPT {identity.GptPartitionId}, " +
-                $"not {PinnedRetirementTargets.DescribeBoot1()}.";
-            return false;
-        }
-
-        return true;
-    }
-
-    private static bool MatchesPinnedBoot2(PartitionIdentity identity, out string error)
-    {
-        error = string.Empty;
-        if (identity.DiskNumber is not int disk || identity.PartitionNumber is not int partition ||
-            !VolumeLocator.TryParseGptId(identity.GptPartitionId, out var gpt))
-        {
-            error = "Boot 2 identity is missing disk, partition, or GPT unique id.";
-            return false;
-        }
-
-        if (!PinnedRetirementTargets.IsPinnedBoot2(disk, partition, gpt))
-        {
-            error =
-                $"Recorded Boot 2 is disk {disk} partition {partition} GPT {identity.GptPartitionId}, " +
-                $"not {PinnedRetirementTargets.DescribeBoot2()}.";
-            return false;
-        }
-
-        return true;
-    }
 
     private static bool IdentifiersAgree(
         PartitionIdentity expected,

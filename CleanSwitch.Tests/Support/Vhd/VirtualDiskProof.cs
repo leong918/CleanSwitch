@@ -20,7 +20,11 @@ internal sealed record VirtualDiskProof(
 /// </summary>
 internal static class VirtualDiskProofVerifier
 {
-    public static VirtualDiskProof Prove(string vhdxPath, int? expectedDiskNumber = null)
+    public static VirtualDiskProof Prove(
+        string vhdxPath,
+        int? expectedDiskNumber = null,
+        Action<string>? diagnostic = null,
+        VirtDiskNative.VirtualDiskAttachment? attachment = null)
     {
         if (string.IsNullOrWhiteSpace(vhdxPath) || !File.Exists(vhdxPath))
         {
@@ -29,7 +33,17 @@ internal static class VirtualDiskProofVerifier
         }
 
         var fullPath = Path.GetFullPath(vhdxPath);
-        var physical = VirtDiskNative.GetPhysicalDrivePath(fullPath);
+        diagnostic?.Invoke(
+            $"Proving exact VHDX mapping path='{fullPath}' expectedDisk=" +
+            $"{(expectedDiskNumber?.ToString() ?? "(discover)")} pid={Environment.ProcessId}.");
+        if (attachment is not null && !string.Equals(attachment.Path, fullPath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Retained VHD attachment path '{attachment.Path}' does not match proof path '{fullPath}'. Refusing.");
+        }
+
+        var physical = attachment?.GetPhysicalDrivePath()
+            ?? VirtDiskNative.GetPhysicalDrivePath(fullPath, diagnostic);
         var diskNumber = VirtDiskNative.ParsePhysicalDriveNumber(physical);
 
         if (diskNumber == 0)
@@ -59,7 +73,9 @@ internal static class VirtualDiskProofVerifier
                 $"Disk {diskNumber} hosts the running system volume. Refusing.");
         }
 
-        return new VirtualDiskProof(fullPath, diskNumber, physical, busType, hostsSystem);
+        var proof = new VirtualDiskProof(fullPath, diskNumber, physical, busType, hostsSystem);
+        diagnostic?.Invoke("VHDX mapping proof passed: " + proof.Describe());
+        return proof;
     }
 
     public static void ProveResolvedTarget(
@@ -67,9 +83,10 @@ internal static class VirtualDiskProofVerifier
         ResolvedDeletionTarget target,
         Guid expectedBoot1Gpt,
         Guid expectedDiskGpt,
-        IReadOnlyCollection<Guid> protectedGpts)
+        IReadOnlyCollection<Guid> protectedGpts,
+        VirtDiskNative.VirtualDiskAttachment attachment)
     {
-        var live = Prove(expected.VhdxPath, expected.DiskNumber);
+        var live = Prove(expected.VhdxPath, expected.DiskNumber, attachment: attachment);
 
         if (target.DiskNumber == 0)
         {

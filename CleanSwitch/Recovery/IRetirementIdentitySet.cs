@@ -2,8 +2,8 @@ namespace CleanSwitch.Recovery;
 
 /// <summary>
 /// Boot 1 / Boot 2 / protected GPT unique ids for one destructive attempt.
-/// Production uses <see cref="PinnedRetirementIdentitySet"/> (this PC's NVMe).
-/// The VHD integration test injects the ids read from the disposable VHDX.
+/// Production derives this set from the accepted schema-v2 operation and the live
+/// GPT snapshot. Tests may inject a set read from a disposable VHDX.
 /// </summary>
 public interface IRetirementIdentitySet
 {
@@ -71,4 +71,33 @@ public sealed class RetirementIdentitySet : IRetirementIdentitySet
     public string DescribeBoot2() =>
         $"Boot 2 GPT {VolumeLocator.FormatGptId(Boot2GptId)} disk={Boot2Disk?.ToString() ?? "?"} " +
         $"partition={Boot2Partition?.ToString() ?? "?"}";
+
+    public static RetirementIdentitySet FromPersistedOperation(
+        CleanSwitch.Models.PartitionIdentity boot1,
+        CleanSwitch.Models.PartitionIdentity boot2,
+        GptLayoutSnapshot live)
+    {
+        ArgumentNullException.ThrowIfNull(boot1);
+        ArgumentNullException.ThrowIfNull(boot2);
+        ArgumentNullException.ThrowIfNull(live);
+
+        if (!boot1.TryGetGptId(out var boot1Gpt) || !boot2.TryGetGptId(out var boot2Gpt))
+        {
+            throw new RetirementExecutionException(
+                "The schema-v2 operation does not contain valid Boot 1 and Boot 2 GPT identities.");
+        }
+
+        return new RetirementIdentitySet
+        {
+            Boot1GptId = boot1Gpt,
+            Boot2GptId = boot2Gpt,
+            Boot2Disk = boot2.DiskNumber,
+            Boot2Partition = boot2.PartitionNumber,
+            ProtectedGptIds = live.Partitions
+                .Where(partition => partition.PartitionGptId != boot1Gpt)
+                .Select(partition => partition.PartitionGptId)
+                .Distinct()
+                .ToArray()
+        };
+    }
 }

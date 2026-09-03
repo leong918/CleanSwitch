@@ -8,6 +8,8 @@ public interface IBootManager
 
     Task<bool> SetNextBootAsync(string bootGuid);
 
+    Task<bool> SetDefaultBootAsync(string bootGuid);
+
     Task RestartAsync(int delaySeconds);
 
     /// <summary>

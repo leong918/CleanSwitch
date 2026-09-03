@@ -28,7 +28,7 @@ public sealed class VhdDestructiveIntegrationTests
         DisposableVhdSession? session = null;
         try
         {
-            session = DisposableVhdSession.Create();
+            session = DisposableVhdSession.Create(_output.WriteLine);
             var proof = session.Reprove();
             Assert.NotEqual(0, proof.DiskNumber);
             Assert.True(StorageBusProbe.IsVirtualBus(proof.BusType), proof.Describe());

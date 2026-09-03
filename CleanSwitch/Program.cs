@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CleanSwitch.Recovery;
@@ -15,6 +16,8 @@ internal static class Program
     private const string HardwareReviewSwitch = "--retirement-hardware-review";
     private const string ExecuteDeletionSwitch = "--execute-deletion";
     private const string ListVolumesSwitch = "--list-volumes";
+    private const string RepairPendingHandoffSwitch = "--repair-pending-handoff";
+    private const string RepairPendingHandoffReviewSwitch = "--repair-pending-handoff-review";
 
     [STAThread]
     static int Main(string[] args)
@@ -24,7 +27,19 @@ internal static class Program
         var recoveryReview = HasSwitch(args, RecoveryReviewSwitch);
         var hardwareReview = HasSwitch(args, HardwareReviewSwitch);
         var executeDeletion = HasSwitch(args, ExecuteDeletionSwitch);
+        var repairPendingHandoff = HasSwitch(args, RepairPendingHandoffSwitch);
+        var repairPendingHandoffReview = HasSwitch(args, RepairPendingHandoffReviewSwitch);
         var reviewOnly = (recoveryReview || hardwareReview) && !recoveryRun;
+
+        if (repairPendingHandoff || repairPendingHandoffReview)
+        {
+            var combined = repairPendingHandoff == repairPendingHandoffReview ||
+                           recoveryRun || recoveryDryRun || recoveryReview || hardwareReview || executeDeletion ||
+                           HasSwitch(args, RecoveryResumePreviewSwitch) ||
+                           HasSwitch(args, RetirementAbandonCommand.Switch) ||
+                           HasSwitch(args, ListVolumesSwitch);
+            return RunPendingHandoffRepair(repairPendingHandoffReview, combined);
+        }
 
         if (HasSwitch(args, ListVolumesSwitch))
         {
@@ -60,6 +75,59 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
         return 0;
+    }
+
+    private static int RunPendingHandoffRepair(bool reviewOnly, bool combinedWithOtherModes)
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+        if (combinedWithOtherModes)
+        {
+            Report("The PENDING handoff repair switches cannot be combined with any other mode.");
+            Report("No BCD command, disk command, state write, boot sequence, or reboot was attempted.");
+            return PauseIfOwned(ownsConsole, 2);
+        }
+
+        try
+        {
+            var options = AppConfiguration.Load();
+            options.AllowStateOnSystemVolume = true;
+            var services = RetirementServices.Create(options, reviewOnly ? "handoff-repair-review" : "handoff-repair");
+            var state = services.Coordinator.TryLoad();
+            var statePath = services.Coordinator.StateFilePath;
+            var beforeHash = HashFile(statePath);
+
+            var repair = new PendingHandoffRepair(
+                new VolumeLocatorGptLayoutSource(),
+                new BootManagerBcdStoreSource(services.BootManager),
+                services.BootManager,
+                services.Log);
+            var result = reviewOnly
+                ? repair.ReviewAsync(state).GetAwaiter().GetResult()
+                : repair.ExecuteAsync(state).GetAwaiter().GetResult();
+
+            var afterHash = HashFile(statePath);
+            Report(result.Describe(reviewOnly));
+            Report($"State SHA256 before: {beforeHash}");
+            Report($"State SHA256 after : {afterHash}");
+            Report($"State unchanged: {string.Equals(beforeHash, afterHash, StringComparison.OrdinalIgnoreCase)}");
+
+            return PauseIfOwned(ownsConsole, result.Passed && beforeHash == afterHash ? 0 : 1);
+        }
+        catch (Exception exception) when (
+            exception is RetirementStorageException or RetirementExecutionException or
+                InvalidOperationException or BootManagerException or IOException or UnauthorizedAccessException)
+        {
+            Report("PENDING handoff repair failed closed.");
+            Report("No disk command, BCD delete, boot sequence, state write, or reboot was attempted by this command.");
+            Report(exception.Message);
+            return PauseIfOwned(ownsConsole, 2);
+        }
+    }
+
+    private static string HashFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(SHA256.HashData(stream));
     }
 
     /// <summary>

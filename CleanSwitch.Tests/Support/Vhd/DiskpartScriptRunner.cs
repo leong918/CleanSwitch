@@ -7,7 +7,7 @@ internal sealed record DiskpartRunResult(int ExitCode, string Output, string Scr
 
 internal static class DiskpartScriptRunner
 {
-    public static DiskpartRunResult Run(IEnumerable<string> lines)
+    public static DiskpartRunResult Run(IEnumerable<string> lines, Action<string>? diagnostic = null)
     {
         var script = string.Join(Environment.NewLine, lines) + Environment.NewLine;
         var scriptPath = Path.Combine(
@@ -15,6 +15,8 @@ internal static class DiskpartScriptRunner
             $"cleanswitch-vhd-diskpart-{Guid.NewGuid():N}.txt");
 
         File.WriteAllText(scriptPath, script, Encoding.ASCII);
+        diagnostic?.Invoke(
+            $"DiskPart script created and file handle closed path='{scriptPath}' pid={Environment.ProcessId}.");
         try
         {
             var start = new ProcessStartInfo
@@ -30,6 +32,8 @@ internal static class DiskpartScriptRunner
 
             using var process = Process.Start(start)
                 ?? throw new InvalidOperationException("diskpart.exe failed to start.");
+            diagnostic?.Invoke(
+                $"DiskPart started pid={process.Id} parentPid={Environment.ProcessId} script='{scriptPath}'.");
             var stdout = process.StandardOutput.ReadToEnd();
             var stderr = process.StandardError.ReadToEnd();
             if (!process.WaitForExit(120_000))
@@ -46,6 +50,8 @@ internal static class DiskpartScriptRunner
             }
 
             var output = (stdout + Environment.NewLine + stderr).Trim();
+            diagnostic?.Invoke(
+                $"DiskPart exited pid={process.Id} exitCode={process.ExitCode}; process handle will be disposed.");
             var result = new DiskpartRunResult(process.ExitCode, output, script);
             if (IsBenignAlreadyOnline(output))
             {
@@ -67,6 +73,7 @@ internal static class DiskpartScriptRunner
             try
             {
                 File.Delete(scriptPath);
+                diagnostic?.Invoke($"DiskPart script deleted path='{scriptPath}'.");
             }
             catch (IOException)
             {

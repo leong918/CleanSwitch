@@ -35,6 +35,78 @@ public sealed class RetirementHardwareReviewTests
     }
 
     [Fact]
+    public void Fresh_reinstall_uses_schema_v2_operation_identity_and_survivor_default()
+    {
+        var freshBoot1 = Guid.Parse("3a11ea37-200c-4804-8d69-1ea92d452a40");
+        var state = CompleteState();
+        state.Status = RetirementStatus.Pending;
+        state.Phase = "2B-identify";
+        state.Boot1Identity!.GptPartitionId = VolumeLocator.FormatGptId(freshBoot1);
+
+        var oldBoot1 = PinnedRetirementTargets.Boot1GptId;
+        var oldPartition = RetirementFixtures.StandardPartitions()
+            .Single(partition => partition.PartitionGptId == oldBoot1);
+        var freshPartition = RetirementFixtures.Partition(
+            freshBoot1,
+            oldPartition.DiskNumber,
+            oldPartition.PartitionNumber,
+            oldPartition.PartitionType!.Value,
+            oldPartition.StartingOffset,
+            oldPartition.SizeBytes,
+            oldPartition.DiskGptId,
+            mount: oldPartition.MountPoint);
+        var layout = RetirementFixtures.StandardLayout()
+            .Replacing(oldBoot1, freshPartition);
+        var bcd = BcdFixtures.StandardSnapshot(
+            current: BcdFixtures.Recovery,
+            defaultId: BcdFixtures.Boot2);
+
+        var result = CreateReview(
+            new FakeGptLayoutSource(layout),
+            new FakeBcdStoreSource(bcd)).Run(state);
+
+        Assert.True(result.Phase2BReviewPassed, result.Describe());
+        Assert.True(result.Phase2CReviewPassed, result.Describe());
+        Assert.DoesNotContain(PinnedRetirementTargets.Boot1Gpt, result.Describe(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(VolumeLocator.FormatGptId(freshBoot1), result.Describe(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Fresh_reinstall_still_fails_closed_when_boot1_is_default()
+    {
+        var result = CreateReview(
+            bcd: new FakeBcdStoreSource(BcdFixtures.StandardSnapshot(defaultId: BcdFixtures.Boot1)))
+            .Run(CompleteState());
+
+        Assert.True(result.Phase2BReviewPassed, result.Describe());
+        Assert.False(result.Phase2CReviewPassed, result.Describe());
+        Assert.Contains("target-is-not-default", result.Describe(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Operation_derived_identity_still_fails_closed_when_survivor_geometry_changes()
+    {
+        var boot2 = RetirementFixtures.StandardPartitions()
+            .Single(partition => partition.PartitionGptId == PinnedRetirementTargets.Boot2GptId);
+        var changedBoot2 = RetirementFixtures.Partition(
+            boot2.PartitionGptId,
+            boot2.DiskNumber,
+            boot2.PartitionNumber,
+            boot2.PartitionType!.Value,
+            boot2.StartingOffset,
+            boot2.SizeBytes + 4096,
+            boot2.DiskGptId,
+            mount: boot2.MountPoint);
+        var layout = RetirementFixtures.StandardLayout()
+            .Replacing(boot2.PartitionGptId, changedBoot2);
+
+        var result = CreateReview(new FakeGptLayoutSource(layout)).Run(CompleteState());
+
+        Assert.False(result.Phase2BReviewPassed, result.Describe());
+        Assert.Contains("boot2-size-consistent", result.Describe(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Legacy_schema_v1_fails_closed()
     {
         var review = CreateReview();

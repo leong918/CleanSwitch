@@ -90,6 +90,27 @@ public sealed class WindowsBootManager : IBootManager
         return true;
     }
 
+    public async Task<bool> SetDefaultBootAsync(string bootGuid)
+    {
+        var normalizedGuid = NormalizeBootGuid(bootGuid);
+        var target = await TryGetEntryAsync(normalizedGuid);
+        if (target is null)
+        {
+            throw new BootManagerException($"The requested default BCD entry {normalizedGuid} was not found.");
+        }
+
+        var result = await RunProcessAsync("bcdedit.exe", ["/default", normalizedGuid]);
+        if (result.ExitCode != 0)
+        {
+            throw new BootManagerException(
+                $"BCDEdit could not set the surviving default loader {normalizedGuid}. " +
+                $"ExitCode={result.ExitCode}. {result.StdErr}".Trim());
+        }
+
+        _log.Info("bcdedit", $"Persistent default boot loader set to survivor {normalizedGuid}.");
+        return true;
+    }
+
     public async Task<IReadOnlyList<BcdEntry>> EnumerateAsync(string scope)
     {
         if (string.IsNullOrWhiteSpace(scope))

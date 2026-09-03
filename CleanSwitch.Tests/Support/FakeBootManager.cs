@@ -7,10 +7,23 @@ internal sealed class FakeBootManager : IBootManager
 {
     public bool RestartCalled { get; private set; }
 
+    public int SetDefaultBootCallCount { get; private set; }
+
+    public string? DefaultBootTarget { get; private set; }
+
+    public Func<string, Task<bool>>? OnSetDefaultBootAsync { get; set; }
+
     public Task<BootLayout> DetectAsync(string? preferredOtherGuid) =>
         throw new NotSupportedException();
 
     public Task<bool> SetNextBootAsync(string bootGuid) => Task.FromResult(true);
+
+    public Task<bool> SetDefaultBootAsync(string bootGuid)
+    {
+        SetDefaultBootCallCount++;
+        DefaultBootTarget = bootGuid;
+        return OnSetDefaultBootAsync?.Invoke(bootGuid) ?? Task.FromResult(true);
+    }
 
     public Task RestartAsync(int delaySeconds)
     {

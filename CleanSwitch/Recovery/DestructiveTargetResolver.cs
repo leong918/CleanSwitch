@@ -25,8 +25,9 @@ public static class DestructiveTargetResolver
         GptLayoutSnapshot live,
         IRetirementIdentitySet? identities = null)
     {
-        identities ??= PinnedRetirementIdentitySet.Instance;
         var report = new ValidationReport("Destructive target resolve");
+
+        identities ??= RetirementIdentitySet.FromPersistedOperation(expectedBoot1, expectedBoot2, live);
 
         if (!expectedBoot1.TryGetGptId(out var boot1Gpt))
         {
@@ -93,6 +94,12 @@ public static class DestructiveTargetResolver
                 : $"Boot 2 GPT unique id matched {boot2Matches.Count} partitions.");
 
         if (boot2Matches.Count != 1)
+        {
+            return Fail(report);
+        }
+
+        AddPersistedIdentityGuards(report, "boot2", expectedBoot2, boot2Matches[0]);
+        if (!report.Passed)
         {
             return Fail(report);
         }
@@ -351,6 +358,44 @@ public static class DestructiveTargetResolver
             type == GptPartitionTypes.BasicData
                 ? "Target GPT type is Basic Data."
                 : $"Target GPT type is {GptPartitionTypes.Describe(type)}, not Basic Data.");
+    }
+
+    private static void AddPersistedIdentityGuards(
+        ValidationReport report,
+        string prefix,
+        PartitionIdentity expected,
+        LivePartition live)
+    {
+        report.Add(
+            $"{prefix}-disk-consistent",
+            expected.DiskNumber is int disk && disk == live.DiskNumber,
+            $"Saved disk={expected.DiskNumber?.ToString() ?? "(missing)"}; live disk={live.DiskNumber}.");
+        report.Add(
+            $"{prefix}-partition-consistent",
+            expected.PartitionNumber is int partition && partition == live.PartitionNumber,
+            $"Saved partition={expected.PartitionNumber?.ToString() ?? "(missing)"}; live partition={live.PartitionNumber}.");
+
+        var diskGptMatches = expected.TryGetDiskGptId(out var diskGpt) &&
+                             live.DiskGptId is Guid liveDiskGpt && diskGpt == liveDiskGpt;
+        report.Add(
+            $"{prefix}-disk-gpt-consistent",
+            diskGptMatches,
+            diskGptMatches ? "Physical disk GPT identity matches." : "Physical disk GPT identity is missing or changed.");
+        report.Add(
+            $"{prefix}-offset-consistent",
+            expected.PartitionStartingOffset is long offset && offset == live.StartingOffset,
+            $"Saved offset={expected.PartitionStartingOffset?.ToString() ?? "(missing)"}; live offset={live.StartingOffset}.");
+        report.Add(
+            $"{prefix}-size-consistent",
+            expected.PartitionSizeBytes is long size && size == live.SizeBytes,
+            $"Saved size={expected.PartitionSizeBytes?.ToString() ?? "(missing)"}; live size={live.SizeBytes}.");
+
+        var typeMatches = GptPartitionTypes.TryParse(expected.GptPartitionType, out var type) &&
+                          live.PartitionType is Guid liveType && type == liveType;
+        report.Add(
+            $"{prefix}-type-consistent",
+            typeMatches,
+            typeMatches ? "GPT partition type matches." : "GPT partition type is missing or changed.");
     }
 
     private static TargetResolveResult Fail(ValidationReport report) =>

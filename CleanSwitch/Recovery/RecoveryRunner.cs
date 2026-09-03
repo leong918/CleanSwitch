@@ -504,7 +504,7 @@ public sealed class RecoveryRunner
             out var boot1Error);
         if (observedBoot1 is null)
         {
-            var snapshot = _executor.ReadPinnedSnapshot();
+            var snapshot = _executor.ReadOperationSnapshot(state.Boot1Identity, state.Boot2Identity);
             if (snapshot.Boot1Count == 0 && snapshot.Boot2Count == 1)
             {
                 var report = new ValidationReport("Retirement target (already absent)");

@@ -15,7 +15,7 @@ public sealed class RetirementHardwareReview
     private readonly IGptLayoutSource _layout;
     private readonly IBcdStoreSource _bcd;
     private readonly IOperationLog _log;
-    private readonly IRetirementIdentitySet _identities;
+    private readonly IRetirementIdentitySet? _identities;
 
     public RetirementHardwareReview(
         IGptLayoutSource layout,
@@ -26,7 +26,7 @@ public sealed class RetirementHardwareReview
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _bcd = bcd ?? throw new ArgumentNullException(nameof(bcd));
         _log = log ?? NullOperationLog.Instance;
-        _identities = identities ?? PinnedRetirementIdentitySet.Instance;
+        _identities = identities;
     }
 
     public RetirementHardwareReviewResult Run(RetirementState? state)

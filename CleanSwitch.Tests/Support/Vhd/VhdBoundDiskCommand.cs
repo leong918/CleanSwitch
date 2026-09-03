@@ -37,7 +37,8 @@ internal sealed class VhdBoundDiskCommand : IDestructiveDiskCommand
             target,
             _session.Boot1.PartitionGptId,
             _session.DiskGptId,
-            _session.Identities.ProtectedGptIds);
+            _session.Identities.ProtectedGptIds,
+            _session.Attachment);
 
         ExecuteCount++;
         LastTarget = target;

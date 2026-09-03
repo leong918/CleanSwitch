@@ -223,6 +223,11 @@ public partial class MainForm : Form
                 boot1Identity,
                 boot2Identity);
 
+            statusLabel.Text = "Setting Boot 2 as the surviving default...";
+            Refresh();
+
+            await services.BootManager.SetDefaultBootAsync(boot2.Identifier);
+
             statusLabel.Text = "Setting the recovery environment as the next boot...";
             Refresh();
 
