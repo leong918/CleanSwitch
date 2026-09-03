@@ -9,6 +9,20 @@ namespace CleanSwitch.Tests;
 public sealed class BcdSurvivorReconciliationTests
 {
     [Fact]
+    public void Phase2c_pre_delete_allows_one_boot1_loader_but_post_delete_requires_it_absent()
+    {
+        var before = RealMachineRetirementFixtures.PreDeleteBcdSnapshot();
+        var state = RealMachineRetirementFixtures.Boot1RetiredState(before);
+
+        var preDelete = BcdSurvivorReconciliation.VerifyBeforeBoot1BcdDelete(state, before, before);
+        var postDelete = BcdSurvivorReconciliation.VerifyAfterBoot1PartitionDelete(state, before, before);
+
+        Assert.True(preDelete.Passed, preDelete.Describe());
+        Assert.False(postDelete.Passed, postDelete.Describe());
+        Assert.Contains(postDelete.Checks, check => check.Name == "boot1-bcd-absent" && !check.Passed);
+    }
+
+    [Fact]
     public void Post_2B_real_machine_state_passes_when_boot1_resume_disappears()
     {
         var before = RealMachineRetirementFixtures.PreDeleteBcdSnapshot();

@@ -1,10 +1,13 @@
-# Phase 2A manual test procedure
+# Phase 2A manual test procedure (historical/non-production)
+
+> Production RETIRE SYSTEM now refuses to create PENDING unless the exact WinRE image
+> selected by `RecoveryGuid` contains the verified CleanSwitch `winpeshl.ini`, manifest,
+> executable and configuration payload. Manual launch from stock WinRE is not accepted as
+> a production continuation. The steps below are retained only as historical test evidence.
 
 Validates the Boot 1 -> Recovery -> Boot 2 handoff. **Nothing is deleted.**
 
-The recovery half is run by hand, because stock WinRE does not auto-start
-CleanSwitch. Automating that needs a customised `winre.wim` or a WinPE stick,
-which is deliberately not part of Phase 2A.
+This document predates the production WinRE launcher provisioning and validation gate.
 
 ## This machine
 

@@ -18,9 +18,11 @@ Live deletion of Boot 1 will not run in this build: `DestructiveOperationsImplem
 
 ## Phase 2A leftovers
 
-4. **Open.** Stock WinRE does not auto-start CleanSwitch. The manual test uses Troubleshoot → Command Prompt. Automating that needs either:
-   - inject the exe into `winre.wim` plus `winpeshl.ini` / `startnet.cmd`, or
-   - a WinPE USB on the Lexar drive (`E:`, already in the firmware boot list).
+4. **Implemented; deployment still required.** Stock WinRE does not auto-start CleanSwitch.
+   `--provision-winre-launcher` now mounts the exact WIM selected by `RecoveryGuid`, embeds
+   the approved self-contained EXE/config plus a hash/version/GPT manifest, and installs an
+   exact `winpeshl.ini` RecoveryRunner command. Phase 2A mounts the WIM read-only and proves
+   that complete contract before identity capture, PENDING, BCD mutation, or reboot.
 5. **Open.** Confirm `--list-volumes` in WinRE still reports Boot 2 as `{4a16be66-dfc5-4b2a-bf95-a7d7d4d2e6fb}` (letter may differ). That is the proof the GPT locator survived the reboot.
 6. **Open.** After a successful run, keep exactly one `retirement-state.json` on Boot 2's volume, with `status: COMPLETE` and `destructiveDeletionPerformed: false`.
 

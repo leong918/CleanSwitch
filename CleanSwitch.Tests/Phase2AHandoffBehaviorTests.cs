@@ -28,7 +28,7 @@ public sealed class Phase2AHandoffBehaviorTests
         Assert.Equal(Boot2, context.BootManager.DefaultBootTarget);
         Assert.Equal(Recovery, context.BootManager.NextBootTarget);
         Assert.True(context.BootManager.RestartCalled);
-        Assert.Equal(new[] { "capture-boot1", "capture-boot2", "default", "bootsequence", "restart" }, context.Events);
+        Assert.Equal(new[] { "launcher", "capture-boot1", "capture-boot2", "default", "bootsequence", "restart" }, context.Events);
     }
 
     [Fact]
@@ -65,6 +65,32 @@ public sealed class Phase2AHandoffBehaviorTests
         Assert.Equal(0, context.BootManager.SetDefaultBootCallCount);
         Assert.Equal(0, context.BootManager.SetNextBootCallCount);
         Assert.False(context.BootManager.RestartCalled);
+    }
+
+    [Fact]
+    public async Task Missing_or_invalid_winre_launcher_fails_before_capture_pending_bcd_or_reboot()
+    {
+        var context = CreateContext(Layout(Boot1, Boot2));
+        context.Launcher.Passed = false;
+        context.Launcher.FailureDetail = "stock WinRE has no CleanSwitch winpeshl.ini";
+        var disk = new FakeDestructiveDiskCommand();
+        var bcd = new FakeDestructiveBcdCommand();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => context.Handoff.ExecuteAsync(context.Layout));
+
+        Assert.Contains("before creating PENDING", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("stock WinRE", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, context.Identity.RecoveryCallCount);
+        Assert.Equal(1, context.Launcher.CallCount);
+        Assert.DoesNotContain("capture-boot1", context.Events);
+        Assert.DoesNotContain("capture-boot2", context.Events);
+        Assert.Equal(0, context.Coordinator.BeginRetirementCallCount);
+        Assert.Equal(0, context.BootManager.SetDefaultBootCallCount);
+        Assert.Equal(0, context.BootManager.SetNextBootCallCount);
+        Assert.False(context.BootManager.RestartCalled);
+        Assert.Equal(0, disk.ExecuteCount);
+        Assert.Equal(0, bcd.ExecuteCount);
     }
 
     [Fact]
@@ -221,16 +247,18 @@ public sealed class Phase2AHandoffBehaviorTests
         };
         var coordinator = new FakeRetirementCoordinator();
         var identity = new FakeIdentitySource(events);
+        var launcher = new FakeWinReLauncherValidator(events: events);
         var options = RetirementFixtures.Options();
         options.Boot2Guid = Boot2;
         options.RecoveryGuid = Recovery;
         options.RestartDelaySeconds = 5;
         return new TestContext(
             layout,
-            new Phase2AHandoff(options, bootManager, coordinator, identity),
+            new Phase2AHandoff(options, bootManager, coordinator, identity, launcher),
             bootManager,
             coordinator,
             identity,
+            launcher,
             events);
     }
 
@@ -298,5 +326,6 @@ public sealed class Phase2AHandoffBehaviorTests
         FakeBootManager BootManager,
         FakeRetirementCoordinator Coordinator,
         FakeIdentitySource Identity,
+        FakeWinReLauncherValidator Launcher,
         List<string> Events);
 }

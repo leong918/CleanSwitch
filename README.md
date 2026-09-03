@@ -339,8 +339,9 @@ The live key pair on this PC is still:
 
 ## Retiring Boot 1 (Phase 2A)
 
-**Phase 2A is implemented. Phases 2B and 2C are not.** Phase 2A builds and proves the
-handoff; it deletes nothing at all.
+Phase 2A builds and proves the handoff; it deletes nothing itself. Production Phase 2B/2C
+remain behind compile-time gates, `EnableDestructiveRetirement`, the per-operation identity
+checks, and the explicit recovery-side `--execute-deletion` argument.
 
 What RETIRE SYSTEM does today:
 
@@ -348,19 +349,24 @@ What RETIRE SYSTEM does today:
    Boot 2.*
 2. Validates the recovery data location (must exist, be writable, and not be the running
    Windows volume).
-3. Validates the Recovery BCD entry.
-4. Writes the retirement state file with status `PENDING`.
-5. Runs `bcdedit /bootsequence {RECOVERY_GUID}`.
-6. Restarts.
+3. Validates the exact Recovery BCD entry and resolves the `winre.wim` it names.
+4. Mounts that WIM read-only and verifies the exact `winpeshl.ini`, launcher manifest,
+   embedded executable/configuration hashes, ProductVersion, RecoveryGuid and
+   `RecoveryDataVolumeGptId` contract.
+5. Captures Boot 1 and Boot 2 GPT identities and writes schema-v2 `PENDING`.
+6. Makes configured Boot 2 the persistent default.
+7. Runs `bcdedit /bootsequence {RECOVERY_GUID}` and restarts.
 
-Any failure in steps 2–5 shows an error and the PC is **not** restarted.
+Any launcher failure occurs before identity capture, `PENDING`, BCD mutation, or reboot.
 
 Then, from a recovery environment command prompt (see the runtime caveat below):
 
 ```text
 X:\...\CleanSwitch.exe --list-volumes       read-only volume / GPT partition report, exits 0
 X:\...\CleanSwitch.exe --recovery-dry-run   validate + log only, no BCD change, no restart
-X:\...\CleanSwitch.exe --recovery-run       perform the Phase 2A handoff
+X:\...\CleanSwitch.exe --recovery-run       recovery entry point without destructive opt-in
+X:\...\CleanSwitch.exe --recovery-run --execute-deletion
+                                                production Phase 2B/2C, all gates still required
 ```
 
 `--recovery-run` loads the state file, moves `PENDING → RECOVERY_STARTED`, reports what it
@@ -368,19 +374,27 @@ can identify about Boot 1, validates the Boot 2 entry, **skips deletion entirely
 Boot 2 as the next boot, records `BCD_UPDATED → VERIFIED`, and restarts. `COMPLETE` is
 recorded by the GUI the next time it starts on Boot 2.
 
-### Runtime caveat for the recovery side
+### Provisioning and validating the recovery-side launcher
 
-WinRE does not ship the .NET 8 desktop runtime, so the framework-dependent build cannot
-run there. Exercising `--recovery-run` inside WinRE requires a self-contained publish, for
-example:
+WinRE does not ship the .NET 8 desktop runtime. The approved live-test build must therefore
+be a self-contained single-file publish. With no active retirement operation, provision the
+exact WIM selected by `RecoveryGuid`, then review it:
 
-```powershell
-dotnet publish --configuration Release --runtime win-x64 --self-contained true
+```text
+CleanSwitch.exe --provision-winre-launcher
+CleanSwitch.exe --winre-launcher-review
 ```
 
-placed on a volume WinRE can see. Until that is set up, use `--recovery-dry-run` from the
-running Windows: it performs every validation, transition and log write, and changes no
-boot state. This limitation is why Phase 2A stops at proving the handoff.
+Provisioning is refused unless both destructive compile-time gates and
+`EnableDestructiveRetirement` are true, and it is also refused while any non-terminal
+retirement state exists. It mounts only the selected WIM, embeds the exact running EXE and
+adjacent appsettings, and installs a strict `winpeshl.ini` that invokes
+`--recovery-run --execute-deletion`. State remains external and is located by the configured
+GPT partition GUID, so Boot 1/Boot 2/WinRE drive-letter changes are irrelevant.
+
+Phase 2A repeats the complete read-only WIM proof on every RETIRE SYSTEM attempt. A stock,
+missing, stale, ambiguous, or differently hashed launcher fails before a new operation is
+written.
 
 ### Retirement state machine
 
@@ -447,17 +461,6 @@ written by earlier builds still load.
 
 Note: `bcdedit /bootsequence` is a one-time setting. Clearing it, if needed, is
 `bcdedit /deletevalue {bootmgr} bootsequence` from an elevated prompt.
-
-## Not implemented
-
-- **Phase 2B** — actually retiring Boot 1 (partition removal). `RetirementExecutor` throws.
-- **Phase 2C** — removing the Boot 1 BCD entry and reclaiming the space.
-- Automatic invocation from WinRE. Phase 2A is started by hand with `--recovery-run`.
-- Verifying `stateVolumeIdentity` against the volume the state file was actually read from.
-  It is recorded, but nothing compares it yet.
-- Deriving Boot 1's partition identity from anything other than the drive letter in its BCD
-  `device` value. That letter is only meaningful in the environment that entry belongs to,
-  so `boot1Identity` is metadata a later phase must re-verify, never act on directly.
 
 ## Out of scope for this POC
 

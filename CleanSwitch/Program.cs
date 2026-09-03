@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CleanSwitch.Models;
 using CleanSwitch.Recovery;
 using CleanSwitch.Services;
 
@@ -18,6 +19,8 @@ internal static class Program
     private const string ListVolumesSwitch = "--list-volumes";
     private const string RepairPendingHandoffSwitch = "--repair-pending-handoff";
     private const string RepairPendingHandoffReviewSwitch = "--repair-pending-handoff-review";
+    private const string ProvisionWinReLauncherSwitch = "--provision-winre-launcher";
+    private const string WinReLauncherReviewSwitch = "--winre-launcher-review";
 
     [STAThread]
     static int Main(string[] args)
@@ -29,7 +32,20 @@ internal static class Program
         var executeDeletion = HasSwitch(args, ExecuteDeletionSwitch);
         var repairPendingHandoff = HasSwitch(args, RepairPendingHandoffSwitch);
         var repairPendingHandoffReview = HasSwitch(args, RepairPendingHandoffReviewSwitch);
+        var provisionWinReLauncher = HasSwitch(args, ProvisionWinReLauncherSwitch);
+        var winReLauncherReview = HasSwitch(args, WinReLauncherReviewSwitch);
         var reviewOnly = (recoveryReview || hardwareReview) && !recoveryRun;
+
+        if (provisionWinReLauncher || winReLauncherReview)
+        {
+            var combined = provisionWinReLauncher == winReLauncherReview ||
+                           recoveryRun || recoveryDryRun || recoveryReview || hardwareReview || executeDeletion ||
+                           repairPendingHandoff || repairPendingHandoffReview ||
+                           HasSwitch(args, RecoveryResumePreviewSwitch) ||
+                           HasSwitch(args, RetirementAbandonCommand.Switch) ||
+                           HasSwitch(args, ListVolumesSwitch);
+            return RunWinReLauncher(provisionWinReLauncher, combined);
+        }
 
         if (repairPendingHandoff || repairPendingHandoffReview)
         {
@@ -75,6 +91,83 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
         return 0;
+    }
+
+    private static int RunWinReLauncher(bool provision, bool combinedWithOtherModes)
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+        if (combinedWithOtherModes)
+        {
+            Report("The WinRE launcher provisioning/review switches cannot be combined with any other mode.");
+            Report("No WIM, BCD, state, disk, boot sequence, or reboot was changed.");
+            return PauseIfOwned(ownsConsole, 2);
+        }
+
+        try
+        {
+            var options = AppConfiguration.Load();
+            var log = FileOperationLog.Create(
+                RetirementStateStore.ResolveLogDirectory(options),
+                provision ? "winre-provision" : "winre-launcher-review");
+            var bootManager = new WindowsBootManager(log);
+            var bootValidator = new BootEntryValidator(bootManager, log);
+            var recovery = bootValidator.ResolveRecoveryEntryAsync(options.RecoveryGuid).GetAwaiter().GetResult();
+            if (recovery.Identifier is null || recovery.Entry is null)
+            {
+                Report("WinRE launcher operation failed closed: RecoveryGuid did not resolve to one exact WinRE BCD entry.");
+                Report(recovery.Report.Describe());
+                return PauseIfOwned(ownsConsole, 2);
+            }
+
+            WinReLauncherValidationResult result;
+            if (provision)
+            {
+                var existing = RetirementServices.CreateForExistingOperation(options, "winre-provision-preflight")
+                    .Coordinator.TryLoad();
+                try
+                {
+                    WinReLauncherProvisioningGuard.Validate(
+                        existing,
+                        options,
+                        ProductionRetirementGates.DestructiveOperationsImplemented,
+                        ProductionRetirementGates.BcdOperationsImplemented);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    Report(exception.Message);
+                    Report("The existing state was read only. No WIM, BCD, state, disk, boot sequence, or reboot was changed.");
+                    return PauseIfOwned(ownsConsole, 2);
+                }
+
+                result = new WindowsWinReLauncherProvisioner(options, log)
+                    .ProvisionAsync(recovery).GetAwaiter().GetResult();
+            }
+            else
+            {
+                result = new WindowsWinReLauncherValidator(options, log)
+                    .ValidateAsync(recovery).GetAwaiter().GetResult();
+            }
+
+            Report(result.Report.Describe());
+            if (!string.IsNullOrWhiteSpace(result.ImagePath))
+            {
+                Report($"Validated WinRE image: {result.ImagePath}");
+            }
+
+            Report(provision
+                ? "Provisioning changes only the selected offline winre.wim; it does not change BCD, retirement state, partitions, bootsequence, or reboot."
+                : "Review was read-only; no WIM, BCD, retirement state, partition, bootsequence, or reboot was changed.");
+            return PauseIfOwned(ownsConsole, result.Passed ? 0 : 1);
+        }
+        catch (Exception exception) when (
+            exception is RetirementStorageException or RetirementExecutionException or InvalidOperationException or
+                BootManagerException or IOException or UnauthorizedAccessException)
+        {
+            Report("WinRE launcher operation failed closed.");
+            Report("No BCD, retirement state, disk, boot sequence, or reboot was changed.");
+            Report(exception.Message);
+            return PauseIfOwned(ownsConsole, 2);
+        }
     }
 
     private static int RunPendingHandoffRepair(bool reviewOnly, bool combinedWithOtherModes)

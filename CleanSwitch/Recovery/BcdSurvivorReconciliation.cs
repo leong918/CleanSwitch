@@ -9,6 +9,28 @@ namespace CleanSwitch.Recovery;
 /// </summary>
 public static class BcdSurvivorReconciliation
 {
+    /// <summary>
+    /// Phase 2C pre-delete observation. Boot 1 may still be present exactly once because
+    /// this runs before bcdedit /delete; every survivor/default invariant must already hold.
+    /// </summary>
+    public static ValidationReport VerifyBeforeBoot1BcdDelete(
+        RetirementState state,
+        BcdSnapshot live,
+        BcdSnapshot? before = null)
+    {
+        var report = new ValidationReport("Pre-delete BCD survivor verification");
+        var boot1 = BcdIdentifiers.RequireConcreteObjectId(state.Boot1BcdObjectId, "Boot 1");
+        var boot1Count = live.WithObjectId(boot1).Count;
+        report.Add(
+            "boot1-bcd-unambiguous",
+            boot1Count <= 1,
+            boot1Count <= 1
+                ? $"Boot 1 BCD object matched {boot1Count}; present is expected before delete, absent is an idempotent resume."
+                : $"Boot 1 BCD object GUID matched {boot1Count} entries. Refusing.");
+        AddSurvivorChecks(report, state, live, before, boot1);
+        return report;
+    }
+
     public static ValidationReport VerifyAfterBoot1PartitionDelete(
         RetirementState state,
         BcdSnapshot after,
@@ -17,9 +39,6 @@ public static class BcdSurvivorReconciliation
         var report = new ValidationReport("Resume BCD survivor verification");
 
         var boot1 = BcdIdentifiers.RequireConcreteObjectId(state.Boot1BcdObjectId, "Boot 1");
-        var boot2 = BcdIdentifiers.RequireConcreteObjectId(state.Boot2BcdObjectId, "Boot 2");
-        var boot1ExclusiveIds = BcdBoot1DependencyGraph.ResolveExclusiveIds(state, after, before);
-
         report.Add(
             "boot1-bcd-absent",
             after.WithObjectId(boot1).Count == 0,
@@ -27,31 +46,45 @@ public static class BcdSurvivorReconciliation
                 ? "Intended Boot 1 BCD object GUID is absent."
                 : "Boot 1 BCD object GUID is still present.");
 
+        AddSurvivorChecks(report, state, after, before, boot1);
+        return report;
+    }
+
+    private static void AddSurvivorChecks(
+        ValidationReport report,
+        RetirementState state,
+        BcdSnapshot live,
+        BcdSnapshot? before,
+        Guid boot1)
+    {
+        var boot2 = BcdIdentifiers.RequireConcreteObjectId(state.Boot2BcdObjectId, "Boot 2");
+        var boot1ExclusiveIds = BcdBoot1DependencyGraph.ResolveExclusiveIds(state, live, before);
+
         report.Add(
             "boot2-bcd-unique",
-            after.WithObjectId(boot2).Count == 1,
-            after.WithObjectId(boot2).Count == 1
+            live.WithObjectId(boot2).Count == 1,
+            live.WithObjectId(boot2).Count == 1
                 ? "Boot 2 BCD object GUID is still unique."
-                : $"Boot 2 BCD object GUID matched {after.WithObjectId(boot2).Count}.");
+                : $"Boot 2 BCD object GUID matched {live.WithObjectId(boot2).Count}.");
 
         report.Add(
             "bootmgr-present",
-            after.BootManagerPresent,
-            after.BootManagerPresent ? "{bootmgr} is still present." : "{bootmgr} is missing.");
+            live.BootManagerPresent,
+            live.BootManagerPresent ? "{bootmgr} is still present." : "{bootmgr} is missing.");
 
-        var defaultOk = after.DefaultObjectId is Guid resolvedDefault &&
+        var defaultOk = live.DefaultObjectId is Guid resolvedDefault &&
                         (resolvedDefault == boot2 || IsApprovedSurvivor(resolvedDefault, state, boot1ExclusiveIds, boot1));
         report.Add(
             "default-is-approved-survivor",
             defaultOk,
-            after.DefaultObjectId is null
+            live.DefaultObjectId is null
                 ? "{default} could not be resolved after delete."
                 : defaultOk
-                    ? $"{{default}} resolves to {BcdIdentifiers.Format(after.DefaultObjectId.Value)}."
-                    : $"{{default}} resolves to {BcdIdentifiers.Format(after.DefaultObjectId.Value)}, which is not an approved survivor.");
+                    ? $"{{default}} resolves to {BcdIdentifiers.Format(live.DefaultObjectId.Value)}."
+                    : $"{{default}} resolves to {BcdIdentifiers.Format(live.DefaultObjectId.Value)}, which is not an approved survivor.");
 
         var required = RequiredSurvivorIds(state, boot1ExclusiveIds, boot1);
-        var missing = required.Where(id => after.WithObjectId(id).Count == 0).ToList();
+        var missing = required.Where(id => live.WithObjectId(id).Count == 0).ToList();
         report.Add(
             "required-bcd-survivors-present",
             missing.Count == 0,
@@ -59,8 +92,6 @@ public static class BcdSurvivorReconciliation
                 ? "Every required surviving BCD object GUID is still present."
                 : "Required surviving BCD object(s) missing: " +
                   string.Join(", ", missing.Select(BcdIdentifiers.Format)));
-
-        return report;
     }
 
     public static IReadOnlySet<Guid> RequiredSurvivorIds(

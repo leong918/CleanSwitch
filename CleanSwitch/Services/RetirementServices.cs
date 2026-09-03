@@ -94,7 +94,14 @@ public sealed class RetirementServices
         var coordinator = new RetirementCoordinator(store, log);
         var diskValidator = new DiskValidator(log);
         var bootEntryValidator = new BootEntryValidator(bootManager, log);
-        var phase2AHandoff = new Phase2AHandoff(options, bootManager, coordinator, bootEntryValidator, log);
+        var launcherValidator = new WindowsWinReLauncherValidator(options, log);
+        var phase2AHandoff = new Phase2AHandoff(
+            options,
+            bootManager,
+            coordinator,
+            bootEntryValidator,
+            launcherValidator,
+            log);
         var layout = new VolumeLocatorGptLayoutSource();
         var bcdStore = new BootManagerBcdStoreSource(bootManager);
         var executor = new RetirementExecutor(

@@ -14,6 +14,7 @@ public sealed class Phase2AHandoff
     private readonly IBootManager _bootManager;
     private readonly IRetirementCoordinator _coordinator;
     private readonly IBootEntryValidator _identitySource;
+    private readonly IWinReLauncherValidator _launcherValidator;
     private readonly IOperationLog _log;
 
     public Phase2AHandoff(
@@ -21,12 +22,14 @@ public sealed class Phase2AHandoff
         IBootManager bootManager,
         IRetirementCoordinator coordinator,
         IBootEntryValidator identitySource,
+        IWinReLauncherValidator launcherValidator,
         IOperationLog? log = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _bootManager = bootManager ?? throw new ArgumentNullException(nameof(bootManager));
         _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
         _identitySource = identitySource ?? throw new ArgumentNullException(nameof(identitySource));
+        _launcherValidator = launcherValidator ?? throw new ArgumentNullException(nameof(launcherValidator));
         _log = log ?? NullOperationLog.Instance;
     }
 
@@ -47,6 +50,20 @@ public sealed class Phase2AHandoff
                 throw new InvalidOperationException(
                     "The Windows Recovery Environment boot entry could not be validated. Nothing was changed." +
                     Environment.NewLine + recovery.Report.Describe());
+            }
+
+            // A stock WinRE entry is not a recovery continuation. Mount and inspect the exact
+            // WIM selected by RecoveryGuid before capturing identities or writing PENDING.
+            // The manifest, winpeshl.ini, embedded executable, appsettings, ProductVersion,
+            // hashes and official RecoveryRunner arguments must all match this running build.
+            reportStage?.Invoke("Verifying the CleanSwitch launcher inside the selected WinRE image...");
+            var launcher = await _launcherValidator.ValidateAsync(recovery);
+            if (!launcher.Passed)
+            {
+                throw new InvalidOperationException(
+                    "RETIRE SYSTEM refused before creating PENDING: the selected recovery environment is not " +
+                    "provisioned with the exact approved CleanSwitch recovery launcher." +
+                    Environment.NewLine + launcher.Report.Describe());
             }
 
             // Second guard: immediately before reading either GPT identity.

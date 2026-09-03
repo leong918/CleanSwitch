@@ -169,7 +169,7 @@ public sealed class ProductionRetirementExecution
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
         }
 
-        var survivorReport = BcdSurvivorReconciliation.VerifyAfterBoot1PartitionDelete(
+        var survivorReport = BcdSurvivorReconciliation.VerifyBeforeBoot1BcdDelete(
             state,
             afterBcd,
             beforeBcd);
@@ -200,9 +200,21 @@ public sealed class ProductionRetirementExecution
             _log.Info(
                 "execution",
                 "Boot 1 BCD object is already absent after Phase 2B. Skipping bcdedit /delete.");
+            var finalAlreadyAbsent = BcdSurvivorReconciliation.VerifyAfterBoot1PartitionDelete(
+                state,
+                afterBcd,
+                beforeBcd);
+            if (!finalAlreadyAbsent.Passed)
+            {
+                var message = "Phase 2C already-absent verification failed." +
+                              Environment.NewLine + finalAlreadyAbsent.Describe();
+                _coordinator.MarkFailed(state, message);
+                return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
+            }
+
             state.BcdDeletionPerformed = false;
             state = _coordinator.Persist(state);
-            return await HandoffAsync(state, request, survivorReport.Describe());
+            return await HandoffAsync(state, request, finalAlreadyAbsent.Describe());
         }
 
         Guid? recovery = BcdIdentifiers.TryParseObjectId(state.RecoveryId, out var recoveryId)
@@ -240,7 +252,33 @@ public sealed class ProductionRetirementExecution
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, exception.Message);
         }
 
-        return await HandoffAsync(state, request, survivorReport.Describe());
+        BcdSnapshot finalBcd;
+        try
+        {
+            finalBcd = await _bcdStore.CaptureAsync();
+        }
+        catch (Exception exception)
+        {
+            var message = "Post-delete survivor enumeration failed. Retirement state will not advance to VERIFIED. " +
+                          exception.Message;
+            _coordinator.MarkFailed(state, message);
+            return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
+        }
+
+        var finalReport = BcdSurvivorReconciliation.VerifyAfterBoot1PartitionDelete(
+            state,
+            finalBcd,
+            afterBcd);
+        _log.Info("execution", finalReport.Describe());
+        if (!finalReport.Passed)
+        {
+            var message = "Post-delete BCD survivor verification failed. Retirement state will not advance to VERIFIED." +
+                          Environment.NewLine + finalReport.Describe();
+            _coordinator.MarkFailed(state, message);
+            return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
+        }
+
+        return await HandoffAsync(state, request, finalReport.Describe());
     }
 
     private async Task<RecoveryRunResult> HandoffAsync(

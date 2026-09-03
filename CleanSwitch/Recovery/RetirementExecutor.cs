@@ -53,7 +53,8 @@ public sealed class RetirementExecutor
         IDestructiveDiskCommand? diskCommand = null,
         IBcdStoreSource? bcdStore = null,
         IDestructiveBcdCommand? bcdCommand = null,
-        IBootManager? bootManager = null)
+        IBootManager? bootManager = null,
+        IRetirementIdentitySet? identities = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _log = log ?? NullOperationLog.Instance;
@@ -63,7 +64,8 @@ public sealed class RetirementExecutor
             _layout,
             diskCommand ?? new DiskpartDestructiveDiskCommand(_log),
             _log,
-            DestructiveOperationsImplemented);
+            DestructiveOperationsImplemented,
+            identities);
         _bcdEngine = new DestructiveBcdRetirementEngine(
             bcdStore ?? new BootManagerBcdStoreSource(bootManager ?? new WindowsBootManager(_log)),
             bcdCommand ?? new BcdeditDestructiveBcdCommand(_log),
