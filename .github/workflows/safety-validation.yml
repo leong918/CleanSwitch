@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'safety/**'
+      - 'fix/**'
   pull_request:
     branches:
       - main
