@@ -51,6 +51,7 @@ public interface IWinReDeploymentPlatform
     Task EnableAsync(WinReDeploymentPlan plan);
     Task<WinReDeploymentVerification> VerifyEnabledAsync(WinReDeploymentPlan plan);
     Task<WinReDeploymentVerification> ReviewLauncherAsync(WinReDeploymentPlan plan);
+    Task<WinReDeploymentVerification> VerifyTerminalCommitAsync(WinReDeploymentPlan plan);
     Task<WinReDeploymentVerification> VerifyPostSmokeAsync(WinReDeploymentPlan plan);
     Task RollbackAsync(WinReDeploymentPlan plan);
     Task<WinReDeploymentVerification> VerifyRollbackAsync(WinReDeploymentPlan plan);
@@ -159,9 +160,9 @@ public sealed class WinReDeploymentTransaction
         await RequireAsync(await _platform.ReviewLauncherAsync(plan), "post-deployment launcher review");
         Complete(WinReDeploymentStage.D5ReviewVerified, "Live registered WIM passed launcher review.");
         Complete(WinReDeploymentStage.AwaitingSmoke,
-            "Deployment awaits a separately authorized --recovery-smoke boot; retirement remains forbidden.");
+            "Deployment awaits explicit independent verification through --commit-winre-deployment or the supported recovery-smoke path; retirement remains forbidden.");
         return new WinReDeploymentResult(true, WinReDeploymentStage.AwaitingSmoke,
-            "Prepared WinRE is installed and reviewed; smoke evidence is still required.", _journal.Path);
+            "Prepared WinRE is installed and reviewed; an explicit terminalization step is still required.", _journal.Path);
     }
 
     public WinReDeploymentResult RecordSmokeVerified(string receiptSha256)
@@ -179,6 +180,34 @@ public sealed class WinReDeploymentTransaction
             "Recovery smoke evidence recorded; final Boot 2 verification is still required.", _journal.Path);
     }
 
+    public async Task<WinReDeploymentResult> CommitVerifiedDeploymentAsync()
+    {
+        using var transactionLock = AcquireExclusiveLock();
+        var current = _journal.Load();
+        RequireSuccessfulDeploymentHistory(current);
+        var root = Directory.GetParent(Path.GetDirectoryName(_journal.Path)!)?.FullName
+            ?? throw new InvalidOperationException("Deployment journal root could not be resolved.");
+        var selected = WinReDeploymentCommitSelection.RequireExactAwaitingSmoke(
+            WinReDeploymentJournalDiscovery.Inspect(root), current.Plan.TransactionId);
+        if (!string.Equals(selected.Path, current.Path, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(selected.Last.RecordSha256, current.Last.RecordSha256, StringComparison.Ordinal))
+            throw new InvalidOperationException("Authoritative deployment transaction changed during commit selection.");
+
+        var verified = await _platform.VerifyTerminalCommitAsync(current.Plan);
+        await RequireAsync(verified, "terminal deployment verification");
+        if (!BcdIdentifiers.IdsEqual(verified.RecoveryGuid, current.Plan.ExpectedRecoveryGuid))
+            throw new InvalidOperationException("Terminal deployment verification did not return the exact planned RecoveryGuid.");
+
+        Complete(WinReDeploymentStage.DeploymentVerified,
+            "Installed WIM, sealed source bundle, original backup, launcher, REAgentC/RecoveryGuid, GPT/state, and servicing cleanup reverified.");
+        Intent(WinReDeploymentStage.CommitIntent,
+            "About to terminalize the explicitly selected verified WinRE deployment; no OS mutation is performed.");
+        Complete(WinReDeploymentStage.Committed,
+            "Deployment reached terminal-safe COMMITTED through explicit independent verification; no retirement authority was granted.");
+        return new WinReDeploymentResult(true, WinReDeploymentStage.Committed,
+            "WinRE deployment transaction independently verified and committed.", _journal.Path);
+    }
+
     public async Task<WinReDeploymentResult> CommitAfterSmokeAsync()
     {
         using var transactionLock = AcquireExclusiveLock();
@@ -186,7 +215,10 @@ public sealed class WinReDeploymentTransaction
         if (current.Last.Stage != WinReDeploymentStage.SmokeVerified)
             throw new InvalidOperationException("Final commit is accepted only after durable SmokeVerified evidence.");
         Intent(WinReDeploymentStage.CommitIntent, "About to run final Boot 2 post-smoke verification.");
-        await RequireAsync(await _platform.VerifyPostSmokeAsync(current.Plan), "post-smoke Boot 2 verification");
+        var verified = await _platform.VerifyTerminalCommitAsync(current.Plan);
+        await RequireAsync(verified, "post-smoke terminal deployment verification");
+        if (!BcdIdentifiers.IdsEqual(verified.RecoveryGuid, current.Plan.ExpectedRecoveryGuid))
+            throw new InvalidOperationException("Post-smoke terminal verification did not return the exact planned RecoveryGuid.");
         Complete(WinReDeploymentStage.Committed,
             "Deployment review, WinRE smoke and final Boot 2 invariants completed.");
         return new WinReDeploymentResult(true, WinReDeploymentStage.Committed,
@@ -221,6 +253,7 @@ public sealed class WinReDeploymentTransaction
                 WinReDeploymentStage.D5EnabledVerified or
                 WinReDeploymentStage.D5ReviewVerified or
                 WinReDeploymentStage.AwaitingSmoke or
+                WinReDeploymentStage.DeploymentVerified or
                 WinReDeploymentStage.SmokeVerified or
                 WinReDeploymentStage.CommitIntent or
                 WinReDeploymentStage.RecoveryRequired);
@@ -247,6 +280,38 @@ public sealed class WinReDeploymentTransaction
             Fail(WinReDeploymentStage.RecoveryRequired,
                 "Rollback could not be verified and requires operator recovery: " + exception.Message);
             throw;
+        }
+    }
+
+    private static void RequireSuccessfulDeploymentHistory(WinReDeploymentJournalSnapshot snapshot)
+    {
+        (WinReDeploymentStage Stage, WinReJournalRecordKind Kind)[] required =
+        [
+            (WinReDeploymentStage.D0Prepared, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D1Snapshotted, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D2BackupVerified, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.FirstMutationAuthorized, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D3DisableIntent, WinReJournalRecordKind.Intent),
+            (WinReDeploymentStage.D3DisabledVerified, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D4RemoveOriginalIntent, WinReJournalRecordKind.Intent),
+            (WinReDeploymentStage.D4OriginalRemoved, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D4CopyIncomingIntent, WinReJournalRecordKind.Intent),
+            (WinReDeploymentStage.D4IncomingVerified, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D4FinalRenameIntent, WinReJournalRecordKind.Intent),
+            (WinReDeploymentStage.D4FinalInstalled, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D5SetReImageIntent, WinReJournalRecordKind.Intent),
+            (WinReDeploymentStage.D5SetReImageVerified, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D5EnableIntent, WinReJournalRecordKind.Intent),
+            (WinReDeploymentStage.D5EnabledVerified, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.D5ReviewVerified, WinReJournalRecordKind.Completion),
+            (WinReDeploymentStage.AwaitingSmoke, WinReJournalRecordKind.Completion)
+        ];
+        if (snapshot.Records.Count != required.Length ||
+            snapshot.Records.Where((record, index) =>
+                record.Stage != required[index].Stage || record.Kind != required[index].Kind).Any())
+        {
+            throw new InvalidOperationException(
+                "Explicit deployment commit requires the complete, exact successful D0-D5 review history ending at AwaitingSmoke.");
         }
     }
 

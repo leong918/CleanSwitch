@@ -27,6 +27,7 @@ internal static class Program
     private const string WinReDeploymentStatusSwitch = "--winre-deployment-status";
     private const string RecoverySmokeSwitch = "--recovery-smoke";
     private const string CompleteWinReSmokeSwitch = "--complete-winre-smoke";
+    private const string CommitWinReDeploymentSwitch = "--commit-winre-deployment";
     private const string RecoveryLaunchSwitch = "--recovery-launch";
     private const string OperationTokenOption = "--operation-token";
     private const string ReconcileLegacyJournalsSwitch = "--reconcile-legacy-winre-journals";
@@ -48,6 +49,7 @@ internal static class Program
         var winReDeploymentStatus = HasSwitch(args, WinReDeploymentStatusSwitch);
         var recoverySmoke = HasSwitch(args, RecoverySmokeSwitch);
         var completeWinReSmoke = HasSwitch(args, CompleteWinReSmokeSwitch);
+        var commitWinReDeployment = HasSwitch(args, CommitWinReDeploymentSwitch);
         var recoveryLaunch = HasSwitch(args, RecoveryLaunchSwitch);
         var reviewOnly = (recoveryReview || hardwareReview) && !recoveryRun;
 
@@ -77,6 +79,11 @@ internal static class Program
         if (completeWinReSmoke)
         {
             return RunCompleteWinReSmoke(args);
+        }
+
+        if (commitWinReDeployment)
+        {
+            return RunCommitWinReDeployment(args);
         }
 
         if (HasSwitch(args, ReconcileLegacyJournalsSwitch))
@@ -276,7 +283,7 @@ internal static class Program
             var result = transaction.DeployAsync(plan).GetAwaiter().GetResult();
             Report(result.Message);
             Report($"Journal: {result.JournalPath}");
-            Report("RETIRE SYSTEM remains forbidden until smoke evidence is recorded and the journal becomes terminal.");
+            Report("RETIRE SYSTEM remains forbidden until explicit deployment verification makes the journal terminal.");
             return PauseIfOwned(ownsConsole, result.Passed ? 0 : 1);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or RetirementStorageException)
@@ -351,6 +358,44 @@ internal static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or InvalidDataException)
         {
             Report("WinRE smoke completion failed closed: " + exception.Message);
+            return PauseIfOwned(ownsConsole, 2);
+        }
+    }
+
+    private static int RunCommitWinReDeployment(string[] args)
+    {
+        var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
+        try
+        {
+            if (!ProductionRetirementGates.WinReDeploymentImplemented)
+                throw new InvalidOperationException("This safe build cannot terminalize a live WinRE deployment.");
+            EnsureOnlyOptions(args, new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                CommitWinReDeploymentSwitch, "--deployment-transaction"
+            });
+            var transactionId = GetOptionValue(args, "--deployment-transaction")
+                ?? throw new InvalidOperationException(
+                    "--commit-winre-deployment requires --deployment-transaction <exact N-format id>.");
+            var options = AppConfiguration.Load();
+            var inventory = WinReDeploymentJournalDiscovery.Inspect(options);
+            var active = WinReDeploymentCommitSelection.RequireExactAwaitingSmoke(inventory, transactionId);
+            var log = FileOperationLog.Create(
+                RetirementStateStore.ResolveLogDirectory(options), "winre-deploy-commit");
+            var transaction = new WinReDeploymentTransaction(
+                new FileWinReDeploymentJournal(active.Path),
+                new WindowsWinReDeploymentPlatform(options, log));
+            var result = transaction.CommitVerifiedDeploymentAsync().GetAwaiter().GetResult();
+            Report(result.Message);
+            Report($"Journal: {result.JournalPath}");
+            Report("Deployment is terminal-safe. This does not authorize RETIRE SYSTEM or destructive execution.");
+            return PauseIfOwned(ownsConsole, result.Passed ? 0 : 1);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                           InvalidOperationException or RetirementStorageException or
+                                           RetirementExecutionException or BootManagerException)
+        {
+            Report("WinRE deployment commit failed closed: " + exception.Message);
+            Report("The journal remains nonterminal and retirement remains blocked. No retirement authority was granted.");
             return PauseIfOwned(ownsConsole, 2);
         }
     }

@@ -1,9 +1,14 @@
-# Disposable Windows VM WinRE harness contract
+# Disposable Windows VM end-to-end retirement harness contract
 
 `scripts/winre-vm-harness.ps1` is the fail-closed host orchestrator consumed by
-`CLEAN_SWITCH_WINRE_DEPLOYMENT_VM_HARNESS`. It does not install a hypervisor and
-does not contain a provider-specific fallback. An operator must explicitly provide
-a VM configuration and a provider adapter.
+`CLEAN_SWITCH_WINRE_DEPLOYMENT_VM_HARNESS`. It does not install a hypervisor,
+select a physical disk, or contain a provider-specific fallback. An operator must
+explicitly provide a disposable VM configuration and provider adapter.
+
+The mandatory gate is three real CleanSwitch retirement cycles. CleanSwitch does
+not restore Boot1. The host hypervisor restores the pristine VM checkpoint only
+after evidence is collected and the VM is stopped; that is test reset, not a
+production rollback.
 
 ## Environment and configuration
 
@@ -15,25 +20,26 @@ $env:CLEAN_SWITCH_RUN_WINRE_DEPLOYMENT_VM_INTEGRATION = '1'
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "disposable": true,
   "vmId": "provider-stable-vm-id",
+  "vmGuid": "11111111-1111-1111-1111-111111111111",
   "providerScript": "D:\\vm-harness\\provider.ps1",
   "approvedVmStorageRoots": ["D:\\DisposableVMs\\CleanSwitch"],
   "baselineCheckpoint": "cleanswitch-pristine",
+  "pristineCheckpointGuid": "22222222-2222-2222-2222-222222222222",
   "artifactRoot": "D:\\vm-harness\\artifacts",
   "providerTimeoutSeconds": 120,
-  "sourceCommit": "<exact-committed-revision-under-test>"
+  "sourceCommit": "<exact-40-hex-committed-revision-under-test>"
 }
 ```
 
-The configuration stays outside the repository because it identifies a specific
-hypervisor and VM. Configuration and provider inspection must both mark the VM
-disposable. Every disk must be a file-backed image beneath exactly one approved,
-non-reparse storage root. Device paths, passthrough disks, host disk numbers,
-physical disk IDs and iSCSI identities are rejected.
-Every provider call has a bounded timeout (5–1800 seconds, default 120); a timeout
-terminates only that provider process and makes readiness/cycle fail closed.
+Configuration and provider inspection must independently identify the exact VM
+and mark it disposable. `vmGuid` and `pristineCheckpointGuid` are immutable
+provider identities, not display names. Every VM disk must be a file-backed image
+beneath exactly one approved, non-reparse storage root. Device paths,
+passthrough disks, host disk numbers, physical disk IDs, and iSCSI identities are
+rejected. Every provider call has a bounded timeout of 5–1800 seconds.
 
 ## Provider interface
 
@@ -49,56 +55,79 @@ It emits exactly one JSON object and exits zero:
 {"success":true,"vmId":"provider-stable-vm-id","command":"start","data":{}}
 ```
 
-Arguments use Base64-encoded UTF-8 JSON so GUIDs, paths and quotes cross the
-Windows PowerShell process boundary without command-line reinterpretation. The
-provider must decode the value and reject malformed JSON.
-
 Required commands:
 
 | Command | Required behavior |
 |---|---|
-| `inspect` | Return disposable flag, Windows build, firmware, GPT style, VM state and every disk. |
-| `checkpoint` | Create/delete an exact named checkpoint; fail on ambiguity. |
-| `restore` | Restore one exact checkpoint and verify identity. |
-| `start` | Start only the configured VM and verify its ID. |
+| `inspect` | Return the immutable VM GUID, disposable flag, Windows build, firmware, GPT style, VM state, and every disk. |
+| `checkpoint` | Create/delete an exact named checkpoint and fail on ambiguity. Used only by readiness proof. |
+| `restore` | Restore one exact checkpoint and return its immutable checkpoint GUID. |
+| `start` | Start only the configured VM and verify its identity. |
 | `stop` | Gracefully stop only the configured VM. |
 | `hard-poweroff` | Power off only the configured VM without guest shutdown. |
 | `guest-command` | Execute one named allowlisted guest action and return structured evidence. |
-| `reboot-to-winre` | Reboot the configured guest into its registered WinRE. |
-| `collect-artifacts` | Copy evidence to the requested host directory and return its manifest. |
+| `wait-for-guest` | Wait for the same VM to return as Boot2 Windows after the product-driven WinRE retirement sequence; it must not force or redirect boot. |
+| `collect-artifacts` | Copy evidence to the requested host directory and return the manifest path and SHA256. |
 
-`inspect.data` includes `disposable`, `windowsBuild`, `firmware`,
-`partitionStyle`, and a `disks` array. Each disk has `attachmentType: "File"`
-and `hostPath`. The forbidden properties `hostDiskNumber`, `physicalDiskId`,
-`passThroughDiskId`, and `iscsiTarget` must be absent or empty.
+`inspect.data` includes `vmGuid`, `disposable`, `windowsBuild`, `firmware`,
+`partitionStyle`, and `disks`. Each disk has `attachmentType: "File"` and
+`hostPath`; forbidden physical-host identity properties must be absent or empty.
 
-## Checkpoint proof
+## Readiness and checkpoint proof
 
 Readiness writes a random guest probe, creates a unique checkpoint, changes the
 probe, hard-powers off the VM, restores the checkpoint, and requires the original
-probe value. It removes the probe and checkpoint afterward. Any failure returns
-`Ready=false`.
+probe value. It removes the probe and checkpoint afterward. This proves that the
+provider can reset a file-backed disposable guest; it does not exercise or model
+CleanSwitch rollback.
 
-Allowlisted guest actions are `checkpoint-probe-write`, `checkpoint-probe-read`,
-`checkpoint-probe-delete`, `pre-cycle`, `prepare-seal`, `deploy`, `review`,
-`verify-winre-smoke`, `rollback`, and `post-cycle-verify`. Results must identify
-the exact requested action and supply the WIM hashes, RecoveryGuid and invariant
-evidence required by the orchestrator.
+## Required destructive cycle
+
+Each `-Cycle` invocation performs this sequence and fails at the first missing,
+false, malformed, ambiguous, or mismatched item:
+
+1. Prove readiness and file-backed VM isolation.
+2. Hard-power off and restore the configured pristine checkpoint; require its GUID.
+3. Start the VM and run `pre-retirement`, proving the exact source/build, pristine Boot1/Boot2/RecoveryData/ESP/Boot2-WinRE GPT layout, terminal-or-absent retirement state, no unresolved deployment journal, original WIM hash, RecoveryGuid, and pre-state GPT/BCD fingerprints.
+4. Run `prepare-seal`, `deploy`, and `review`; require the sealed bundle, prepared/deployed WIM hash equality, the exact `AwaitingSmoke` transaction boundary, exact launcher-contract hash, and unchanged RecoveryGuid. Then invoke `--commit-winre-deployment --deployment-transaction <id>` through the `commit-winre-deployment` guest action and require the same transaction to become terminal `COMMITTED`, with its journal SHA256 recorded and no unresolved journal remaining.
+5. Run `start-retirement`. The guest adapter must initiate the real product-supported `RETIRE SYSTEM` path—never call internal services or manufacture state—and return proof that Phase2A committed its handoff, made Boot2 the persistent default, and armed Boot2 recovery one-shot. The terminal deployment is a prerequisite only; it grants no retirement authority.
+6. The product reboots itself. The provider only waits. `winpeshl.ini` must automatically run `CleanSwitch.exe --recovery-launch`; the dispatcher must select retirement, and `RecoveryRunner` must perform fresh Phase2B validation, delete only Boot1, verify its GPT absence and all required survivors, remove the Boot1 BCD loader, persist `VERIFIED`, and reboot to Boot2.
+7. After Boot2 starts, run `verify-retirement`. Require Boot1 partition and loader absent; Boot2, RecoveryData, ESP, recovery partitions, and Boot2 WinRE present; Boot2 loader still persistent default; `COMPLETE` startup evidence; exactly one destructive deletion; at most one BCD deletion; valid post-retirement REAgentC; and no unresolved deployment journal.
+8. Collect the full artifact set and its SHA256 manifest, stop the VM, then hard-power off and restore the same pristine checkpoint GUID for the next independent cycle.
+
+The allowlisted guest actions are `checkpoint-probe-write`,
+`checkpoint-probe-read`, `checkpoint-probe-delete`, `pre-retirement`,
+`prepare-seal`, `deploy`, `review`, `commit-winre-deployment`, `start-retirement`, and
+`verify-retirement`. There is no CleanSwitch rollback action in this gate and no
+host command that forces the guest into WinRE.
+
+Per-cycle evidence includes VM/checkpoint GUIDs and disk paths; source commit and
+executable/config hashes; original, prepared, bundle, and deployed WIM hashes;
+launcher hash/review, deployment transaction/journal hashes, and RecoveryGuid; pre/post GPT and BCD fingerprints; Phase2A
+state; RecoveryRunner log; exact resolved Boot1 identity; destructive and BCD
+delete counts; final state and Boot2/default proof; post-retirement REAgentC;
+journal inventory; and a SHA256 artifact manifest.
 
 ## Entry points
 
 ```powershell
 & $env:CLEAN_SWITCH_WINRE_DEPLOYMENT_VM_HARNESS -Readiness -ResultPath D:\vm-harness\readiness.json
-& $env:CLEAN_SWITCH_WINRE_DEPLOYMENT_VM_HARNESS -Command start
+& $env:CLEAN_SWITCH_WINRE_DEPLOYMENT_VM_HARNESS -Cycle 1 -ResultPath D:\vm-harness\cycle-1.json
 ```
 
-The existing xUnit test calls:
+The mandatory xUnit test invokes cycles 1, 2, and 3 independently. A pass requires
+all three. No command falls back to the physical host, and an unavailable provider
+or guest action remains a mandatory skip/failure rather than becoming PASS.
 
-```text
-winre-vm-harness.ps1 -Cycle <1..3> -ResultPath <unique-json-path>
-```
+## Known implementation prerequisites
 
-No command runs without exact VM identity, dual disposable attestation,
-file-backed disk isolation and a proven checkpoint restore. There is no fallback
-to the physical host. Direct command forwarding also reruns the complete readiness
-gate before invoking the requested provider command.
+The product now exposes an explicit, transaction-bound terminalization command.
+A real provider/guest adapter still cannot pass until it has reviewed ways to:
+
+- invoke `--commit-winre-deployment --deployment-transaction <id>` after independent launcher review and return terminal journal evidence; and
+- activate the existing GUI-only
+  `RETIRE SYSTEM` action and return Phase2A evidence without invoking internal
+  services, writing retirement state, or forcing a WinRE boot.
+
+Until those prerequisites are implemented and reviewed, the VM gate is expected
+to remain unavailable/NO-GO.

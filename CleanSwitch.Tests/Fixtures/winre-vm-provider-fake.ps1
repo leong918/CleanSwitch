@@ -21,6 +21,7 @@ switch ($Command) {
         }
         $data = [ordered]@{
             disposable = $true; windowsBuild = 26100; firmware = 'UEFI'; partitionStyle = 'GPT'
+            vmGuid = $env:CLEAN_SWITCH_FAKE_VM_GUID
             state = 'Off'; disks = @($disk)
         }
     }
@@ -37,6 +38,7 @@ switch ($Command) {
     'restore' {
         $checkpointPath = Join-Path $stateRoot ("checkpoint-" + $arguments.name + '.txt')
         Copy-Item -LiteralPath $checkpointPath -Destination (Join-Path $stateRoot 'probe.txt') -Force
+        $data = [ordered]@{ checkpointGuid = $env:CLEAN_SWITCH_FAKE_VM_CHECKPOINT_GUID }
     }
     'guest-command' {
         $result = [ordered]@{ action = $arguments.action }
@@ -48,7 +50,7 @@ switch ($Command) {
         }
         $data = [ordered]@{ exitCode = 0; result = $result }
     }
-    { $_ -in @('start', 'stop', 'hard-poweroff', 'reboot-to-winre', 'collect-artifacts') } { }
+    { $_ -in @('start', 'stop', 'hard-poweroff', 'wait-for-guest', 'collect-artifacts') } { }
     default { exit 93 }
 }
 

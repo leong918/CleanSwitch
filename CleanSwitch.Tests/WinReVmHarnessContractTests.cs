@@ -14,7 +14,7 @@ public sealed class WinReVmHarnessContractTests
     public void Harness_declares_all_required_provider_commands_and_cycle_interface()
     {
         var source = File.ReadAllText(HarnessPath);
-        foreach (var command in new[] { "checkpoint", "restore", "start", "stop", "hard-poweroff", "guest-command", "reboot-to-winre", "collect-artifacts" })
+        foreach (var command in new[] { "checkpoint", "restore", "start", "stop", "hard-poweroff", "guest-command", "wait-for-guest", "collect-artifacts" })
             Assert.Contains($"'{command}'", source, StringComparison.Ordinal);
         Assert.Contains("[int] $Cycle", source, StringComparison.Ordinal);
         Assert.Contains("[string] $ResultPath", source, StringComparison.Ordinal);
@@ -33,6 +33,26 @@ public sealed class WinReVmHarnessContractTests
         Assert.Contains("PhysicalDrive", source, StringComparison.Ordinal);
         Assert.Contains("Approved VM storage root must not be a reparse point", source, StringComparison.Ordinal);
         Assert.Contains("Checkpoint restore proof failed", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cycle_contract_is_destructive_retirement_and_uses_checkpoint_only_as_host_reset()
+    {
+        var source = File.ReadAllText(HarnessPath);
+        foreach (var action in new[] { "pre-retirement", "prepare-seal", "deploy", "review", "commit-winre-deployment", "start-retirement", "verify-retirement" })
+            Assert.Contains($"'{action}'", source, StringComparison.Ordinal);
+        Assert.Contains("deploymentTransactionId = $deploymentTransactionId", source, StringComparison.Ordinal);
+        Assert.Contains("productPath') -cne 'RETIRE SYSTEM'", source, StringComparison.Ordinal);
+        Assert.Contains("dispatcherSelectedRetirement", source, StringComparison.Ordinal);
+        Assert.Contains("destructiveDeletionCount') -ne 1", source, StringComparison.Ordinal);
+        Assert.Contains("retirementStateStatus') -cne 'COMPLETE'", source, StringComparison.Ordinal);
+        Assert.Contains("cycle-$CycleNumber-post-evidence-reset", source, StringComparison.Ordinal);
+        var collect = source.IndexOf("'collect-artifacts'", source.IndexOf("function Invoke-Cycle", StringComparison.Ordinal), StringComparison.Ordinal);
+        var reset = source.IndexOf("cycle-$CycleNumber-post-evidence-reset", StringComparison.Ordinal);
+        Assert.True(collect >= 0 && reset > collect, "Pristine checkpoint reset must occur only after evidence collection.");
+        Assert.DoesNotContain("verify-winre-smoke", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Invoke-GuestAction $Config 'rollback'", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("'reboot-to-winre'", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -102,12 +122,14 @@ public sealed class WinReVmHarnessContractTests
         var config = Path.Combine(root, "config.json");
         File.WriteAllText(config, $$"""
             {
-              "schemaVersion": 1,
+              "schemaVersion": 2,
               "disposable": true,
               "vmId": "fake-disposable-vm",
+              "vmGuid": "11111111-1111-1111-1111-111111111111",
               "providerScript": "{{FakeProviderPath.Replace("\\", "\\\\")}}",
               "approvedVmStorageRoots": ["{{storage.Replace("\\", "\\\\")}}"],
               "baselineCheckpoint": "baseline",
+              "pristineCheckpointGuid": "22222222-2222-2222-2222-222222222222",
               "artifactRoot": "{{Path.Combine(root, "artifacts").Replace("\\", "\\\\")}}",
               "providerTimeoutSeconds": 15,
               "sourceCommit": "b86575c7c2faaeebb81b01a901c4959a07c5ebc8"
@@ -126,6 +148,8 @@ public sealed class WinReVmHarnessContractTests
         start.Environment["CLEAN_SWITCH_FAKE_VM_STATE_ROOT"] = fixture.StateRoot;
         start.Environment["CLEAN_SWITCH_FAKE_VM_DISK_PATH"] = fixture.DiskPath;
         start.Environment["CLEAN_SWITCH_FAKE_VM_ATTACHMENT_TYPE"] = fixture.AttachmentType;
+        start.Environment["CLEAN_SWITCH_FAKE_VM_GUID"] = "11111111-1111-1111-1111-111111111111";
+        start.Environment["CLEAN_SWITCH_FAKE_VM_CHECKPOINT_GUID"] = "22222222-2222-2222-2222-222222222222";
         if (fixture.HostDiskNumber is not null)
             start.Environment["CLEAN_SWITCH_FAKE_VM_HOST_DISK_NUMBER"] = fixture.HostDiskNumber;
         using var process = Process.Start(start)!;

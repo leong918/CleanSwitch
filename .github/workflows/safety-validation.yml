@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'safety/**'
+      - 'fix/**'
   pull_request:
     branches:
       - main
@@ -210,39 +211,57 @@ jobs:
                   Write-Host $stderr
                   Write-Host '========================================'
 
-                  @"
-### Failed test
+                  $annotation = @(
+                    "Test: $fqn"
+                    "Test Name: $name"
+                    "Duration: $duration"
+                    "Outcome: $outcome"
+                    'Error:'
+                    $msg
+                    'Stack trace:'
+                    $stack
+                    'StdOut:'
+                    $stdout
+                    'StdErr:'
+                    $stderr
+                  ) -join "`n"
+                  $annotation = $annotation.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                  Write-Host "::error title=Isolated Windows integration failure::$annotation"
 
-**Test**
-`$fqn`
-
-**Duration**
-`$duration`
-
-**Outcome**
-`$outcome`
-
-**Error**
-```
-$msg
-```
-
-**Stack trace**
-```
-$stack
-```
-
-**StdOut**
-```text
-$stdout
-```
-
-**StdErr**
-```text
-$stderr
-```
-
-"@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+                  $summary = @(
+                    '### Failed test'
+                    ''
+                    '**Test**'
+                    ('`' + $fqn + '`')
+                    ''
+                    '**Duration**'
+                    ('`' + $duration + '`')
+                    ''
+                    '**Outcome**'
+                    ('`' + $outcome + '`')
+                    ''
+                    '**Error**'
+                    '```'
+                    $msg
+                    '```'
+                    ''
+                    '**Stack trace**'
+                    '```'
+                    $stack
+                    '```'
+                    ''
+                    '**StdOut**'
+                    '```text'
+                    $stdout
+                    '```'
+                    ''
+                    '**StdErr**'
+                    '```text'
+                    $stderr
+                    '```'
+                    ''
+                  )
+                  $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
                 }
               }
             }

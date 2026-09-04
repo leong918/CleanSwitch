@@ -4,6 +4,14 @@ using Xunit.Sdk;
 
 namespace CleanSwitch.Tests.Support.Vhd;
 
+internal static class VhdIntegrationCollection
+{
+    public const string Name = "Disposable VHD integration";
+}
+
+[CollectionDefinition(VhdIntegrationCollection.Name, DisableParallelization = true)]
+public sealed class VhdIntegrationCollectionDefinition;
+
 /// <summary>
 /// Opt-in fact. Normal <c>dotnet test</c> skips this unless CLEANSWITCH_VHD_TESTS=1.
 /// </summary>

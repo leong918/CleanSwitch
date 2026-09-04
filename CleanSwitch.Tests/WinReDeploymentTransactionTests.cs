@@ -9,6 +9,19 @@ public sealed class WinReDeploymentTransactionTests
     public static IEnumerable<object[]> FaultBoundaries =>
         Enum.GetValues<WinReDeploymentFaultPoint>().Select(point => new object[] { point });
 
+    [Fact]
+    public void New_terminal_verification_stage_preserves_all_persisted_legacy_stage_values()
+    {
+        Assert.Equal(17, (int)WinReDeploymentStage.AwaitingSmoke);
+        Assert.Equal(18, (int)WinReDeploymentStage.SmokeVerified);
+        Assert.Equal(19, (int)WinReDeploymentStage.CommitIntent);
+        Assert.Equal(20, (int)WinReDeploymentStage.Committed);
+        Assert.Equal(21, (int)WinReDeploymentStage.RollbackIntent);
+        Assert.Equal(22, (int)WinReDeploymentStage.RolledBack);
+        Assert.Equal(23, (int)WinReDeploymentStage.RecoveryRequired);
+        Assert.Equal(24, (int)WinReDeploymentStage.DeploymentVerified);
+    }
+
     [Theory]
     [MemberData(nameof(FaultBoundaries))]
     public async Task Process_kill_at_every_D3_D5_boundary_requires_deterministic_rollback(
@@ -92,6 +105,188 @@ public sealed class WinReDeploymentTransactionTests
         var committed = await fixture.Transaction().CommitAfterSmokeAsync();
         Assert.Equal(WinReDeploymentStage.Committed, committed.Stage);
         Assert.True(fixture.Journal.Load().IsTerminal);
+    }
+
+    [Fact]
+    public async Task AwaitingSmoke_blocks_startup_until_explicit_verified_commit()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+
+        var inventory = WinReDeploymentJournalDiscovery.Inspect(fixture.JournalRoot);
+
+        Assert.True(StartupFlow.IsBlocked(inventory));
+        Assert.Equal(WinReDeploymentStage.AwaitingSmoke, Assert.Single(inventory.Active).Last.Stage);
+    }
+
+    [Fact]
+    public async Task Valid_AwaitingSmoke_explicit_commit_becomes_terminal_and_allows_startup()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+
+        var result = await fixture.Transaction().CommitVerifiedDeploymentAsync();
+        var snapshot = fixture.Journal.Load();
+        var restartedInventory = WinReDeploymentJournalDiscovery.Inspect(fixture.JournalRoot);
+
+        Assert.Equal(WinReDeploymentStage.Committed, result.Stage);
+        Assert.True(snapshot.IsTerminal);
+        Assert.Contains(snapshot.Records, record => record.Stage == WinReDeploymentStage.DeploymentVerified);
+        Assert.Empty(restartedInventory.Active);
+        Assert.Empty(restartedInventory.Invalid);
+        Assert.False(StartupFlow.IsBlocked(restartedInventory));
+    }
+
+    [Fact]
+    public async Task Committed_deployment_does_not_create_or_satisfy_retirement_authority()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        await fixture.Transaction().CommitVerifiedDeploymentAsync();
+        var state = new RetirementState { Status = RetirementStatus.Aborted };
+        var runtime = new RecoveryRuntimeEvidence(true, BcdAliasResolution.Resolved,
+            Guid.Parse(fixture.Plan.ExpectedRecoveryGuid));
+
+        Assert.Throws<RetirementExecutionException>(() =>
+            RetirementExecutionAuthorization.RequireCommitted(state, new CleanSwitchOptions(), null, runtime));
+        Assert.DoesNotContain(fixture.Journal.Load().Records,
+            record => record.Detail.Contains("retirement authorization granted", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Launcher_mismatch_prevents_explicit_commit()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        fixture.Platform.LauncherPasses = false;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().CommitVerifiedDeploymentAsync());
+
+        Assert.Equal(WinReDeploymentStage.AwaitingSmoke, fixture.Journal.Load().Last.Stage);
+    }
+
+    [Fact]
+    public async Task Installed_WIM_hash_mismatch_prevents_explicit_commit()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        File.AppendAllText(fixture.Live, "drift");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().CommitVerifiedDeploymentAsync());
+
+        Assert.Equal(WinReDeploymentStage.AwaitingSmoke, fixture.Journal.Load().Last.Stage);
+    }
+
+    [Fact]
+    public async Task RecoveryGuid_drift_prevents_explicit_commit()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        fixture.Platform.RecoveryGuid = "{99999999-9999-9999-9999-999999999999}";
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().CommitVerifiedDeploymentAsync());
+
+        Assert.Equal(WinReDeploymentStage.AwaitingSmoke, fixture.Journal.Load().Last.Stage);
+    }
+
+    [Fact]
+    public async Task Corrupt_journal_prevents_explicit_commit_selection()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        File.AppendAllText(fixture.Journal.Path, "{truncated");
+
+        var inventory = WinReDeploymentJournalDiscovery.Inspect(fixture.JournalRoot);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WinReDeploymentCommitSelection.RequireExactAwaitingSmoke(inventory, fixture.Plan.TransactionId));
+        Assert.Single(inventory.Invalid);
+    }
+
+    [Fact]
+    public async Task Multiple_AwaitingSmoke_transactions_prevent_explicit_commit()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        var second = new FileWinReDeploymentJournal(Path.Combine(
+            fixture.JournalRoot, "two", "deployment-journal.ndjson"));
+        second.Create(fixture.Plan with { TransactionId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
+        second.Append(WinReDeploymentStage.AwaitingSmoke, WinReJournalRecordKind.Completion, "ambiguous fixture");
+
+        var inventory = WinReDeploymentJournalDiscovery.Inspect(fixture.JournalRoot);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WinReDeploymentCommitSelection.RequireExactAwaitingSmoke(inventory, fixture.Plan.TransactionId));
+        Assert.Equal(2, inventory.Active.Count);
+    }
+
+    [Fact]
+    public async Task Unresolved_owned_DISM_mount_prevents_explicit_commit()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        fixture.Platform.UnresolvedMount = true;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().CommitVerifiedDeploymentAsync());
+
+        Assert.Equal(WinReDeploymentStage.AwaitingSmoke, fixture.Journal.Load().Last.Stage);
+    }
+
+    [Fact]
+    public async Task Stale_prepared_bundle_prevents_explicit_commit()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        File.AppendAllText(fixture.PreparedBundle, "stale");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().CommitVerifiedDeploymentAsync());
+
+        Assert.Equal(WinReDeploymentStage.AwaitingSmoke, fixture.Journal.Load().Last.Stage);
+    }
+
+    [Fact]
+    public async Task Terminal_committed_journal_reloads_with_a_valid_hash_chain()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        await fixture.Transaction().CommitVerifiedDeploymentAsync();
+
+        var first = fixture.Journal.Load();
+        var second = new FileWinReDeploymentJournal(fixture.Journal.Path).Load();
+
+        Assert.Equal(first.Last.RecordSha256, second.Last.RecordSha256);
+        Assert.Equal(WinReDeploymentStage.Committed, second.Last.Stage);
+        Assert.True(second.IsTerminal);
+    }
+
+    [Fact]
+    public async Task Failed_terminal_verification_preserves_deterministic_rollback()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        fixture.Platform.UnresolvedMount = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().CommitVerifiedDeploymentAsync());
+        fixture.Platform.UnresolvedMount = false;
+
+        var rolledBack = await fixture.Transaction().RecoverToRollbackAsync();
+
+        Assert.Equal(WinReDeploymentStage.RolledBack, rolledBack.Stage);
+        Assert.Equal(fixture.OriginalHash, Hash(fixture.Live));
+    }
+
+    [Fact]
+    public async Task Explicit_commit_performs_verification_and_journal_appends_only()
+    {
+        using var fixture = DeploymentFixture.Create();
+        await fixture.Transaction().DeployAsync(fixture.Plan);
+        var disableCalls = fixture.Platform.DisableCallCount;
+
+        await fixture.Transaction().CommitVerifiedDeploymentAsync();
+
+        Assert.Equal(disableCalls, fixture.Platform.DisableCallCount);
+        Assert.Equal(1, fixture.Platform.TerminalCommitCallCount);
+        Assert.False(fixture.Platform.RollbackCalled);
+        Assert.Equal(fixture.PreparedHash, Hash(fixture.Live));
     }
 
     [Fact]
@@ -439,8 +634,11 @@ public sealed class WinReDeploymentTransactionTests
         public string RecoveryGuid { get; set; } = fixture.Plan.ExpectedRecoveryGuid;
         public bool RollbackCalled { get; private set; }
         public bool PostSmokePasses { get; set; } = true;
+        public bool LauncherPasses { get; set; } = true;
+        public bool UnresolvedMount { get; set; }
         public bool FirstMutationPasses { get; set; } = true;
         public int DisableCallCount { get; private set; }
+        public int TerminalCommitCallCount { get; private set; }
 
         public Task<WinReDeploymentVerification> VerifyD0Async(WinReDeploymentPlan plan) =>
             Result(Hash(plan.LiveWimPath) == plan.ExpectedOriginalWimSha256);
@@ -473,7 +671,19 @@ public sealed class WinReDeploymentTransactionTests
         public Task EnableAsync(WinReDeploymentPlan plan) { Enabled = true; return Task.CompletedTask; }
         public Task<WinReDeploymentVerification> VerifyEnabledAsync(WinReDeploymentPlan plan) =>
             Task.FromResult(new WinReDeploymentVerification(Enabled && Registered && ProtectedBcdUnchanged, "enabled", RecoveryGuid));
-        public Task<WinReDeploymentVerification> ReviewLauncherAsync(WinReDeploymentPlan plan) => Ok();
+        public Task<WinReDeploymentVerification> ReviewLauncherAsync(WinReDeploymentPlan plan) => Result(LauncherPasses);
+        public Task<WinReDeploymentVerification> VerifyTerminalCommitAsync(WinReDeploymentPlan plan)
+        {
+            TerminalCommitCallCount++;
+            var passed = LauncherPasses && !UnresolvedMount && PostSmokePasses &&
+                         Hash(plan.PreparedWimPath) == plan.PreparedWimSha256 &&
+                         Hash(plan.PreparedBundlePath) == plan.PreparedBundleSha256 &&
+                         Hash(plan.BackupWimPath) == plan.ExpectedOriginalWimSha256 &&
+                         Hash(plan.LiveWimPath) == plan.PreparedWimSha256 &&
+                         !File.Exists(plan.IncomingWimPath);
+            return Task.FromResult(new WinReDeploymentVerification(
+                passed, passed ? "PASS" : "FAIL", RecoveryGuid));
+        }
         public Task<WinReDeploymentVerification> VerifyPostSmokeAsync(WinReDeploymentPlan plan) => Result(PostSmokePasses);
         public Task RollbackAsync(WinReDeploymentPlan plan)
         {

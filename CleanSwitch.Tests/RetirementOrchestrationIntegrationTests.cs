@@ -8,6 +8,7 @@ using Xunit.Abstractions;
 
 namespace CleanSwitch.Tests;
 
+[Collection(VhdIntegrationCollection.Name)]
 public sealed class RetirementOrchestrationIntegrationTests(ITestOutputHelper output)
 {
     [CombinedRetirementIntegrationFact]

@@ -75,6 +75,25 @@ public sealed class WinReLauncherDispatchTests
 #endif
     }
 
+    [Fact]
+    public void Explicit_deployment_commit_is_transaction_bound_and_dispatched_before_interlock()
+    {
+        var source = File.ReadAllText(FindRepoFile("CleanSwitch", "Program.cs"));
+        var commit = source.IndexOf("if (commitWinReDeployment)", StringComparison.Ordinal);
+        var inventory = source.IndexOf(
+            "var deploymentInventory = WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load())",
+            StringComparison.Ordinal);
+        var method = source[source.IndexOf("private static int RunCommitWinReDeployment", StringComparison.Ordinal)..
+            source.IndexOf("private static string? GetOptionValue", StringComparison.Ordinal)];
+
+        Assert.True(commit >= 0 && inventory > commit);
+        Assert.Contains("--commit-winre-deployment", method, StringComparison.Ordinal);
+        Assert.Contains("--deployment-transaction", method, StringComparison.Ordinal);
+        Assert.Contains("RequireExactAwaitingSmoke", method, StringComparison.Ordinal);
+        Assert.Contains("WinReDeploymentImplemented", method, StringComparison.Ordinal);
+        Assert.Contains("does not authorize RETIRE SYSTEM", method, StringComparison.Ordinal);
+    }
+
     private static string FindRepoFile(params string[] parts)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
