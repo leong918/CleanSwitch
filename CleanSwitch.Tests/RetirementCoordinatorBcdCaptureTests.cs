@@ -49,7 +49,7 @@ public sealed class RetirementCoordinatorBcdCaptureTests
         Assert.Equal(boot2, state.Boot2BcdObjectId);
 
         var json = File.ReadAllText(coordinator.StateFilePath);
-        Assert.Contains("\"schemaVersion\": 3", json, StringComparison.Ordinal);
+        Assert.Contains("\"schemaVersion\": 4", json, StringComparison.Ordinal);
         Assert.Contains("\"boot1BcdObjectId\":", json, StringComparison.Ordinal);
         Assert.Contains("\"boot2BcdObjectId\":", json, StringComparison.Ordinal);
         Assert.Contains(boot1, json, StringComparison.OrdinalIgnoreCase);

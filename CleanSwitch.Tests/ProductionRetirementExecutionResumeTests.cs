@@ -51,7 +51,7 @@ public sealed class ProductionRetirementExecutionResumeTests
         Assert.Contains("[PASS]", result.Message, StringComparison.Ordinal);
         Assert.Equal(0, diskCommand.ExecuteCount);
         Assert.Equal(0, bcdCommand.ExecuteCount);
-        Assert.Equal(RetirementStatus.Boot1Retired, coordinator.State!.Status);
+        Assert.Equal(RetirementStatus.BcdUpdated, coordinator.State!.Status);
     }
 
     [LiveTestBuildFact]
