@@ -10,8 +10,9 @@ namespace CleanSwitch.Tests.Support;
 /// </summary>
 internal static class RealMachineRetirementFixtures
 {
-    public static readonly Guid Boot1Gpt = Guid.Parse("eab2ae6c-4d1b-4181-873c-3b8f06a1e465");
+    public static readonly Guid Boot1Gpt = Guid.Parse("3a11ea37-200c-4804-8d69-1ea92d452a40");
     public static readonly Guid Boot2Gpt = Guid.Parse("4a16be66-dfc5-4b2a-bf95-a7d7d4d2e6fb");
+    public static readonly Guid DiskGpt = Guid.Parse("5fc0204d-ca71-447b-a7ad-c2f88f654e1a");
     public static readonly Guid Boot1Loader = Guid.Parse("fc583d40-a29c-11f1-b0e3-e548a1d3146f");
     public static readonly Guid Boot1Resume = Guid.Parse("fc583d3f-a29c-11f1-b0e3-e548a1d3146f");
     public static readonly Guid Boot1Recovery = Guid.Parse("fc583d41-a29c-11f1-b0e3-e548a1d3146f");
@@ -57,7 +58,7 @@ internal static class RealMachineRetirementFixtures
                 DiskNumber = 0,
                 PartitionNumber = 3,
                 GptPartitionId = BcdIdentifiers.Format(Boot1Gpt),
-                DiskGptUniqueId = "{5fc0204d-ca71-447b-a7ad-c2f88f654e1a}",
+                DiskGptUniqueId = VolumeLocator.FormatGptId(DiskGpt),
                 PartitionStartingOffset = 227540992,
                 PartitionSizeBytes = 226434744320,
                 GptPartitionType = VolumeLocator.FormatGptId(GptPartitionTypes.BasicData),
@@ -69,7 +70,7 @@ internal static class RealMachineRetirementFixtures
                 DiskNumber = 0,
                 PartitionNumber = 6,
                 GptPartitionId = BcdIdentifiers.Format(Boot2Gpt),
-                DiskGptUniqueId = "{5fc0204d-ca71-447b-a7ad-c2f88f654e1a}",
+                DiskGptUniqueId = VolumeLocator.FormatGptId(DiskGpt),
                 PartitionStartingOffset = 751845769216,
                 PartitionSizeBytes = 247539433472,
                 GptPartitionType = VolumeLocator.FormatGptId(GptPartitionTypes.BasicData),
@@ -82,6 +83,25 @@ internal static class RealMachineRetirementFixtures
         SurvivorInventoryCapture.ApplyToState(state, before, new FakeGptLayoutSource(new GptLayoutSnapshot([], null, [])));
         return state;
     }
+
+    public static GptLayoutSnapshot PostBoot1RetiredGptSnapshot() =>
+        new(
+            [
+                new LivePartition
+                {
+                    PartitionGptId = Boot2Gpt,
+                    DiskGptId = DiskGpt,
+                    DiskNumber = 0,
+                    PartitionNumber = 6,
+                    PartitionType = GptPartitionTypes.BasicData,
+                    StartingOffset = 751845769216,
+                    SizeBytes = 247539433472,
+                    IsRunningSystemVolume = false,
+                    MountPoint = "D:\\"
+                }
+            ],
+            runningSystemGptId: null,
+            []);
 
     public static BcdSnapshot PreDeleteBcdSnapshot() =>
         new(

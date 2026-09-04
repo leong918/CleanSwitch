@@ -14,9 +14,12 @@ public sealed class RetirementResumePreviewTests
         var before = RealMachineRetirementFixtures.PreDeleteBcdSnapshot();
         var after = RealMachineRetirementFixtures.PostDeleteBcdSnapshot();
         var state = RealMachineRetirementFixtures.Boot1RetiredState(before);
+        var layout = RealMachineRetirementFixtures.PostBoot1RetiredGptSnapshot();
 
-        var preview = await CreatePreview(after).RunAsync(state);
+        var preview = await CreatePreview(after, layout).RunAsync(state);
 
+        Assert.Empty(layout.WithGptId(RealMachineRetirementFixtures.Boot1Gpt));
+        Assert.Single(layout.WithGptId(RealMachineRetirementFixtures.Boot2Gpt));
         Assert.Equal("PASS", preview.Readiness);
         Assert.Equal("SKIP", preview.Phase2BAction);
         Assert.Contains("NO-OP", preview.Phase2CDeleteAction, StringComparison.Ordinal);
@@ -47,9 +50,31 @@ public sealed class RetirementResumePreviewTests
         Assert.False(preview.SurvivorReconciliationPassed);
     }
 
-    private static RetirementResumePreview CreatePreview(BcdSnapshot bcd) =>
+    [Fact]
+    public async Task Preview_fails_closed_when_injected_boot2_gpt_is_missing()
+    {
+        var before = RealMachineRetirementFixtures.PreDeleteBcdSnapshot();
+        var after = RealMachineRetirementFixtures.PostDeleteBcdSnapshot();
+        var state = RealMachineRetirementFixtures.Boot1RetiredState(before);
+        var missingBoot2 = new GptLayoutSnapshot([], null, []);
+
+        var preview = await CreatePreview(after, missingBoot2).RunAsync(state);
+
+        Assert.Equal("FAIL", preview.Readiness);
+        Assert.False(preview.Boot2GptObserved);
+        Assert.Contains(
+            VolumeLocator.FormatGptId(RealMachineRetirementFixtures.Boot2Gpt),
+            preview.FailureReason,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static RetirementResumePreview CreatePreview(
+        BcdSnapshot bcd,
+        GptLayoutSnapshot? layout = null) =>
         new(
-            new DiskValidator(new RecordingOperationLog()),
+            new DiskValidator(
+                new RecordingOperationLog(),
+                new FakeGptLayoutSource(layout ?? RealMachineRetirementFixtures.PostBoot1RetiredGptSnapshot())),
             new FakeBcdStoreSource(bcd));
 
     private static BcdSnapshot Remove(BcdSnapshot snapshot, Guid objectId)
