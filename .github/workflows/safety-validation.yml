@@ -211,6 +211,23 @@ jobs:
                   Write-Host $stderr
                   Write-Host '========================================'
 
+                  $annotation = @(
+                    "Test: $fqn"
+                    "Test Name: $name"
+                    "Duration: $duration"
+                    "Outcome: $outcome"
+                    'Error:'
+                    $msg
+                    'Stack trace:'
+                    $stack
+                    'StdOut:'
+                    $stdout
+                    'StdErr:'
+                    $stderr
+                  ) -join "`n"
+                  $annotation = $annotation.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                  Write-Host "::error title=Isolated Windows integration failure::$annotation"
+
                   $summary = @(
                     '### Failed test'
                     ''
