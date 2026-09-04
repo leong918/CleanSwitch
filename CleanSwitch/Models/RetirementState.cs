@@ -15,12 +15,14 @@ public enum RetirementStatus
     TargetValidated,
     Boot2Validated,
     Phase2BReady,
+    DestructiveIntent,
     Boot1Retired,
     BcdUpdated,
     Verified,
     Complete,
     Failed,
-    Aborted
+    Aborted,
+    RecoveryRequired
 }
 
 public static class RetirementStatusNames
@@ -32,12 +34,14 @@ public static class RetirementStatusNames
         (RetirementStatus.TargetValidated, "TARGET_VALIDATED"),
         (RetirementStatus.Boot2Validated, "BOOT2_VALIDATED"),
         (RetirementStatus.Phase2BReady, "PHASE_2B_READY"),
+        (RetirementStatus.DestructiveIntent, "DESTRUCTIVE_INTENT"),
         (RetirementStatus.Boot1Retired, "BOOT1_RETIRED"),
         (RetirementStatus.BcdUpdated, "BCD_UPDATED"),
         (RetirementStatus.Verified, "VERIFIED"),
         (RetirementStatus.Complete, "COMPLETE"),
         (RetirementStatus.Failed, "FAILED"),
-        (RetirementStatus.Aborted, "ABORTED")
+        (RetirementStatus.Aborted, "ABORTED"),
+        (RetirementStatus.RecoveryRequired, "RECOVERY_REQUIRED")
     ];
 
     public static string ToWire(RetirementStatus status) =>
@@ -103,7 +107,7 @@ public sealed class RetirementTransition
 /// </summary>
 public sealed class RetirementState
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 4;
 
     public const int MinimumReadableSchemaVersion = 1;
 
@@ -143,6 +147,24 @@ public sealed class RetirementState
     /// </summary>
     [JsonPropertyOrder(9)]
     public bool DestructiveDeletionPerformed { get; set; }
+
+    public string HandoffAuthorizationState { get; set; } = HandoffAuthorizationStates.None;
+
+    public string? HandoffAuthorizationToken { get; set; }
+
+    public string? HandoffAuthorizationBindingSha256 { get; set; }
+
+    public string? HandoffRecoveryBcdObjectId { get; set; }
+
+    public DateTimeOffset? HandoffArmedAtUtc { get; set; }
+
+    public DateTimeOffset? HandoffCommittedAtUtc { get; set; }
+
+    public DateTimeOffset? HandoffDisarmedAtUtc { get; set; }
+
+    public DateTimeOffset? DestructiveIntentAtUtc { get; set; }
+
+    public List<DestructiveIntentPartitionSnapshot>? DestructiveIntentGptSnapshot { get; set; }
 
     /// <summary>
     /// Phase 2C sets this after a successful <c>bcdedit /delete</c> and post-delete verify.
@@ -217,5 +239,27 @@ public sealed class RetirementState
     public List<RetirementTransition> Transitions { get; set; } = [];
 
     public bool IsTerminal =>
-        Status is RetirementStatus.Complete or RetirementStatus.Aborted;
+        Status is RetirementStatus.Complete or RetirementStatus.Aborted or RetirementStatus.RecoveryRequired;
+}
+
+public static class HandoffAuthorizationStates
+{
+    public const string None = "NONE";
+    public const string Preparing = "PREPARING";
+    public const string Armed = "ARMED";
+    public const string Committed = "COMMITTED";
+    public const string Disarmed = "DISARMED";
+    public const string RecoveryRequired = "RECOVERY_REQUIRED";
+}
+
+public sealed class DestructiveIntentPartitionSnapshot
+{
+    public required string PartitionGptId { get; set; }
+    public string? DiskGptUniqueId { get; set; }
+    public required int DiskNumber { get; set; }
+    public required int PartitionNumber { get; set; }
+    public string? GptPartitionType { get; set; }
+    public required long StartingOffset { get; set; }
+    public required long SizeBytes { get; set; }
+    public bool IsRunningSystemVolume { get; set; }
 }

@@ -172,6 +172,47 @@ public sealed class DestructiveRetirementEngineTests
         Assert.False(log.Contains("destructiveDeletionOccurred=true"));
     }
 
+    [Theory]
+    [InlineData(DestructiveRetirementFaultPoint.ImmediatelyBeforeDiskCommand, 0, true)]
+    [InlineData(DestructiveRetirementFaultPoint.ImmediatelyAfterDiskCommand, 1, false)]
+    public async Task Power_loss_faults_bracket_the_exact_disk_command(
+        DestructiveRetirementFaultPoint point,
+        int expectedCommandCount,
+        bool targetRemains)
+    {
+        var layout = new FakeGptLayoutSource(RetirementFixtures.StandardLayout());
+        var command = new FakeDestructiveDiskCommand
+        {
+            OnExecute = _ => layout.Current = layout.Current.Without(PinnedRetirementTargets.Boot1GptId)
+        };
+        var engine = new DestructiveRetirementEngine(
+            RetirementFixtures.Options(enableDestructive: true),
+            layout,
+            command,
+            new RecordingOperationLog(),
+            destructiveOperationsImplemented: true,
+            identities: null,
+            faults: new ThrowAtDestructiveFault(point));
+
+        await Assert.ThrowsAsync<RetirementExecutionException>(() => engine.ExecuteAsync(
+            RetirementFixtures.Boot1Identity(),
+            RetirementFixtures.Boot2Identity(),
+            RetirementFixtures.PassingValidation(),
+            explicitOptIn: true));
+
+        Assert.Equal(expectedCommandCount, command.ExecuteCount);
+        Assert.Equal(targetRemains, layout.Current.WithGptId(PinnedRetirementTargets.Boot1GptId).Count == 1);
+    }
+
+    private sealed class ThrowAtDestructiveFault(DestructiveRetirementFaultPoint expected)
+        : IDestructiveRetirementFaultInjector
+    {
+        public void Hit(DestructiveRetirementFaultPoint point)
+        {
+            if (point == expected) throw new InvalidOperationException("simulated power loss");
+        }
+    }
+
     private static DestructiveRetirementEngine CreateEngine(
         IGptLayoutSource layout,
         IDestructiveDiskCommand command,

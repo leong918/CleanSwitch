@@ -3,6 +3,24 @@ using CleanSwitch.Services;
 
 namespace CleanSwitch.Recovery;
 
+public enum DestructiveRetirementFaultPoint
+{
+    ImmediatelyBeforeDiskCommand,
+    ImmediatelyAfterDiskCommand
+}
+
+public interface IDestructiveRetirementFaultInjector
+{
+    void Hit(DestructiveRetirementFaultPoint point);
+}
+
+public sealed class NoDestructiveRetirementFaults : IDestructiveRetirementFaultInjector
+{
+    public static readonly NoDestructiveRetirementFaults Instance = new();
+    private NoDestructiveRetirementFaults() { }
+    public void Hit(DestructiveRetirementFaultPoint point) { }
+}
+
 /// <summary>
 /// Live deletion engine. The caller supplies the compile-time profile gate. Safe builds
 /// pass false; the explicit live-test profile passes true and still requires runtime opt-in,
@@ -16,6 +34,7 @@ public sealed class DestructiveRetirementEngine
     private readonly IRetirementIdentitySet? _identities;
     private readonly bool _implemented;
     private readonly bool _configEnabled;
+    private readonly IDestructiveRetirementFaultInjector _faults;
 
     public DestructiveRetirementEngine(
         CleanSwitchOptions options,
@@ -23,7 +42,8 @@ public sealed class DestructiveRetirementEngine
         IDestructiveDiskCommand command,
         IOperationLog? log,
         bool destructiveOperationsImplemented,
-        IRetirementIdentitySet? identities = null)
+        IRetirementIdentitySet? identities = null,
+        IDestructiveRetirementFaultInjector? faults = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -32,6 +52,7 @@ public sealed class DestructiveRetirementEngine
         _identities = identities;
         _implemented = destructiveOperationsImplemented;
         _configEnabled = options.EnableDestructiveRetirement;
+        _faults = faults ?? NoDestructiveRetirementFaults.Instance;
     }
 
     public async Task<RetirementExecutionResult> ExecuteAsync(
@@ -109,7 +130,9 @@ public sealed class DestructiveRetirementEngine
         DestructiveCommandResult commandResult;
         try
         {
+            _faults.Hit(DestructiveRetirementFaultPoint.ImmediatelyBeforeDiskCommand);
             commandResult = await _command.ExecuteAsync(resolved.Target);
+            _faults.Hit(DestructiveRetirementFaultPoint.ImmediatelyAfterDiskCommand);
         }
         catch (Exception exception) when (exception is not RetirementExecutionException)
         {

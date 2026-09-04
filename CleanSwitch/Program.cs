@@ -27,6 +27,9 @@ internal static class Program
     private const string WinReDeploymentStatusSwitch = "--winre-deployment-status";
     private const string RecoverySmokeSwitch = "--recovery-smoke";
     private const string CompleteWinReSmokeSwitch = "--complete-winre-smoke";
+    private const string RecoveryLaunchSwitch = "--recovery-launch";
+    private const string OperationTokenOption = "--operation-token";
+    private const string ReconcileLegacyJournalsSwitch = "--reconcile-legacy-winre-journals";
 
     [STAThread]
     static int Main(string[] args)
@@ -45,6 +48,7 @@ internal static class Program
         var winReDeploymentStatus = HasSwitch(args, WinReDeploymentStatusSwitch);
         var recoverySmoke = HasSwitch(args, RecoverySmokeSwitch);
         var completeWinReSmoke = HasSwitch(args, CompleteWinReSmokeSwitch);
+        var recoveryLaunch = HasSwitch(args, RecoveryLaunchSwitch);
         var reviewOnly = (recoveryReview || hardwareReview) && !recoveryRun;
 
         if (recoverySmoke)
@@ -67,7 +71,12 @@ internal static class Program
             return RunCompleteWinReSmoke(args);
         }
 
-        var deploymentInventory = WinReDeploymentJournalDiscovery.Inspect();
+        if (HasSwitch(args, ReconcileLegacyJournalsSwitch))
+        {
+            return RunLegacyJournalReconciliation(args);
+        }
+
+        var deploymentInventory = WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load());
         if (deploymentInventory.Invalid.Count > 0 || deploymentInventory.Active.Count > 0)
         {
             ConsoleHost.Attach(allocateIfMissing: true);
@@ -85,6 +94,11 @@ internal static class Program
             return RunWinReDeployment(args);
         }
 
+        if (recoveryLaunch)
+        {
+            return RunRecoveryLaunch(args);
+        }
+
         if (provisionWinReLauncher || winReLauncherReview)
         {
             var combined = provisionWinReLauncher == winReLauncherReview ||
@@ -93,7 +107,7 @@ internal static class Program
                            HasSwitch(args, RecoveryResumePreviewSwitch) ||
                            HasSwitch(args, RetirementAbandonCommand.Switch) ||
                            HasSwitch(args, ListVolumesSwitch);
-            return RunWinReLauncher(provisionWinReLauncher, combined);
+            return RunWinReLauncher(args, provisionWinReLauncher, combined);
         }
 
         if (repairPendingHandoff || repairPendingHandoffReview)
@@ -134,12 +148,47 @@ internal static class Program
             return RunRecoverySide(new RecoveryRunRequest(
                 DryRun: recoveryDryRun && !recoveryRun,
                 ReviewOnly: reviewOnly,
-                ExecuteDeletion: executeDeletion && !reviewOnly));
+                ExecuteDeletion: executeDeletion && !reviewOnly,
+                OperationToken: GetOptionValue(args, OperationTokenOption)));
         }
 
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
         return 0;
+    }
+
+    private static int RunRecoveryLaunch(string[] args)
+    {
+        try
+        {
+            EnsureOnlyOptions(args, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { RecoveryLaunchSwitch });
+            var options = AppConfiguration.Load();
+            var services = RetirementServices.CreateForExistingOperation(options, "recovery-launch");
+            var state = services.Coordinator.TryLoad()
+                ?? throw new InvalidOperationException("No active retirement handoff exists.");
+            return RunRecoverySide(new RecoveryRunRequest(false, false, true, state.HandoffAuthorizationToken));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or RetirementStorageException)
+        {
+            Report("Recovery launcher failed closed: " + exception.Message);
+            return 2;
+        }
+    }
+
+    private static int RunLegacyJournalReconciliation(string[] args)
+    {
+        try
+        {
+            EnsureOnlyOptions(args, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ReconcileLegacyJournalsSwitch });
+            var marker = WinReDeploymentJournalDiscovery.ReconcileLegacyJournals(AppConfiguration.Load());
+            Report("Legacy WinRE journal reconciliation completed: " + marker);
+            return 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or RetirementStorageException)
+        {
+            Report("Legacy WinRE journal reconciliation failed closed: " + exception.Message);
+            return 2;
+        }
     }
 
     private static int RunRecoverySmoke(string[] args)
@@ -180,7 +229,7 @@ internal static class Program
             return PauseIfOwned(ownsConsole, 2);
         }
 
-        var inventory = WinReDeploymentJournalDiscovery.Inspect();
+        var inventory = WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load());
         foreach (var invalid in inventory.Invalid) Report("INVALID: " + invalid);
         foreach (var active in inventory.Active)
             Report($"ACTIVE: {active.Path} stage={active.Last.Stage} sequence={active.Last.Sequence}");
@@ -199,17 +248,20 @@ internal static class Program
                 throw new InvalidOperationException("Live WinRE deployment additionally requires explicit --execute-winre-deployment.");
             var prepared = GetOptionValue(args, "--prepared-winre")
                 ?? throw new InvalidOperationException("--prepared-winre <absolute prepared Winre.wim path> is required.");
+            var expectedOriginalHash = GetOptionValue(args, "--expected-original-winre-sha256")
+                ?? throw new InvalidOperationException("--expected-original-winre-sha256 <SHA256> is required.");
             var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                DeployWinReLauncherSwitch, ExecuteWinReDeploymentSwitch, "--prepared-winre"
+                DeployWinReLauncherSwitch, ExecuteWinReDeploymentSwitch, "--prepared-winre",
+                "--expected-original-winre-sha256"
             };
             EnsureOnlyOptions(args, allowed);
 
             var options = AppConfiguration.Load();
             var log = FileOperationLog.Create(RetirementStateStore.ResolveLogDirectory(options), "winre-deploy");
-            var plan = WinReDeploymentPlanBuilder.BuildAsync(options, prepared, log).GetAwaiter().GetResult();
+            var plan = WinReDeploymentPlanBuilder.BuildAsync(options, prepared, expectedOriginalHash, log).GetAwaiter().GetResult();
             var journalPath = Path.Combine(
-                WinReDeploymentJournalDiscovery.MachineRoot,
+                WinReDeploymentJournalDiscovery.ResolveAuthoritativeRoot(options),
                 plan.TransactionId,
                 "deployment-journal.ndjson");
             var transaction = new WinReDeploymentTransaction(
@@ -242,7 +294,7 @@ internal static class Program
             {
                 RecoverWinReDeploymentSwitch, ExecuteWinReDeploymentSwitch
             });
-            var inventory = WinReDeploymentJournalDiscovery.Inspect();
+            var inventory = WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load());
             if (inventory.Invalid.Count != 0 || inventory.Active.Count != 1)
                 throw new InvalidOperationException("Recovery requires exactly one valid unresolved deployment journal.");
             var active = inventory.Active[0];
@@ -274,7 +326,7 @@ internal static class Program
             });
             var receipt = GetOptionValue(args, "--receipt")
                 ?? throw new InvalidOperationException("--receipt <recovery smoke receipt path> is required.");
-            var inventory = WinReDeploymentJournalDiscovery.Inspect();
+            var inventory = WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load());
             if (inventory.Invalid.Count != 0 || inventory.Active.Count != 1 ||
                 inventory.Active[0].Last.Stage != WinReDeploymentStage.AwaitingSmoke)
                 throw new InvalidOperationException("Smoke completion requires exactly one valid AwaitingSmoke deployment journal.");
@@ -322,7 +374,8 @@ internal static class Program
             if (!seen.Add(name)) throw new InvalidOperationException($"Duplicate option '{name}'.");
             if ((string.Equals(name, "--prepared-winre", StringComparison.OrdinalIgnoreCase) ||
                  string.Equals(name, "--receipt", StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(name, "--deployment-transaction", StringComparison.OrdinalIgnoreCase)) && !raw.Contains('='))
+                 string.Equals(name, "--deployment-transaction", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(name, "--expected-original-winre-sha256", StringComparison.OrdinalIgnoreCase)) && !raw.Contains('='))
             {
                 if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
                     throw new InvalidOperationException($"Option '{name}' requires a value.");
@@ -331,7 +384,7 @@ internal static class Program
         }
     }
 
-    private static int RunWinReLauncher(bool provision, bool combinedWithOtherModes)
+    private static int RunWinReLauncher(string[] args, bool provision, bool combinedWithOtherModes)
     {
         var ownsConsole = ConsoleHost.Attach(allocateIfMissing: true);
         if (combinedWithOtherModes)
@@ -343,6 +396,16 @@ internal static class Program
 
         try
         {
+            EnsureOnlyOptions(args, provision
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ProvisionWinReLauncherSwitch, "--expected-original-winre-sha256"
+                }
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase) { WinReLauncherReviewSwitch });
+            var expectedOriginalHash = provision
+                ? GetOptionValue(args, "--expected-original-winre-sha256")
+                    ?? throw new InvalidOperationException("--expected-original-winre-sha256 <SHA256> is required for preparation.")
+                : null;
             var options = AppConfiguration.Load();
             var log = FileOperationLog.Create(
                 RetirementStateStore.ResolveLogDirectory(options),
@@ -378,7 +441,7 @@ internal static class Program
                 }
 
                 result = new WindowsWinReLauncherProvisioner(options, log)
-                    .ProvisionAsync(recovery).GetAwaiter().GetResult();
+                    .ProvisionAsync(recovery, expectedOriginalHash!).GetAwaiter().GetResult();
             }
             else
             {

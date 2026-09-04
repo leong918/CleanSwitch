@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CleanSwitch.Models;
+using CleanSwitch.Services;
 
 namespace CleanSwitch.Recovery;
 
@@ -9,6 +11,7 @@ public enum WinReDeploymentStage
     D0Prepared,
     D1Snapshotted,
     D2BackupVerified,
+    FirstMutationAuthorized,
     D3DisableIntent,
     D3DisabledVerified,
     D4RemoveOriginalIntent,
@@ -41,7 +44,7 @@ public enum WinReJournalRecordKind
 
 public sealed record WinReDeploymentPlan
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     public int SchemaVersion { get; init; } = CurrentSchemaVersion;
     public required string TransactionId { get; init; }
@@ -50,6 +53,9 @@ public sealed record WinReDeploymentPlan
     public required string PreparedBundlePath { get; init; }
     public required string PreparedBundleSha256 { get; init; }
     public required string LiveWimPath { get; init; }
+    public required string ExpectedOriginalWimSha256 { get; init; }
+    public required string ObservedOriginalWimSha256 { get; init; }
+    /// <summary>Compatibility copy of the observed hash; must equal ObservedOriginalWimSha256.</summary>
     public required string OriginalWimSha256 { get; init; }
     public required string BackupWimPath { get; init; }
     public required string IncomingWimPath { get; init; }
@@ -125,6 +131,7 @@ public sealed class FileWinReDeploymentJournal : IWinReDeploymentJournal
     public WinReDeploymentJournalSnapshot Create(WinReDeploymentPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        WinReDeploymentHashPolicy.RequireSealedPlan(plan);
         if (File.Exists(Path))
         {
             throw new InvalidOperationException($"Deployment journal already exists: '{Path}'.");
@@ -214,7 +221,16 @@ public sealed class FileWinReDeploymentJournal : IWinReDeploymentJournal
             previous = record.RecordSha256;
         }
 
-        return new WinReDeploymentJournalSnapshot(Path, records);
+        var snapshot = new WinReDeploymentJournalSnapshot(Path, records);
+        try
+        {
+            WinReDeploymentHashPolicy.RequireSealedPlan(snapshot.Plan);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new InvalidDataException("Deployment journal plan hash contract is invalid: " + exception.Message, exception);
+        }
+        return snapshot;
     }
 
     private void AppendDurable(WinReDeploymentJournalRecord record, bool createNew)
@@ -269,12 +285,160 @@ public sealed record WinReDeploymentJournalInventory(
 
 public static class WinReDeploymentJournalDiscovery
 {
-    public static string MachineRoot => System.IO.Path.Combine(
+    public static string LegacyMachineRoot => System.IO.Path.Combine(
         WindowsWinReWorkspaceFactory.MachineRoot, "deployments");
 
-    public static WinReDeploymentJournalInventory Inspect(string? root = null)
+    public static string ResolveAuthoritativeRoot(CleanSwitchOptions options)
     {
-        root ??= MachineRoot;
+        ArgumentNullException.ThrowIfNull(options);
+        if (!VolumeLocator.TryParseGptId(options.RecoveryDataVolumeGptId, out _))
+            throw new RetirementStorageException(
+                "CleanSwitch:RecoveryDataVolumeGptId must be a concrete GPT id before WinRE journal discovery.");
+
+        var statePath = RetirementStateStore.ResolveStateFilePath(options);
+        var stateDirectory = System.IO.Path.GetDirectoryName(statePath)
+            ?? throw new RetirementStorageException("The RecoveryData state directory could not be resolved.");
+        return System.IO.Path.Combine(stateDirectory, "winre-deployments");
+    }
+
+    public static WinReDeploymentJournalInventory Inspect(CleanSwitchOptions options)
+    {
+        var authoritativeRoot = ResolveAuthoritativeRoot(options);
+        var authoritative = Inspect(authoritativeRoot);
+        if (authoritative.Active.Count > 0 || authoritative.Invalid.Count > 0) return authoritative;
+        try
+        {
+            ValidateLegacyReconciliationMarker(authoritativeRoot, options);
+            return authoritative;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
+        {
+            return new WinReDeploymentJournalInventory(authoritative.Active,
+                [.. authoritative.Invalid, "Legacy cross-boot journal reconciliation is not proven: " + exception.Message]);
+        }
+    }
+
+    public static string ReconcileLegacyJournals(CleanSwitchOptions options)
+    {
+        var authoritativeRoot = ResolveAuthoritativeRoot(options);
+        var roots = ResolveProtectedLegacyRoots(options);
+        var invalid = new List<string>();
+        var active = new List<WinReDeploymentJournalSnapshot>();
+        foreach (var (role, root) in roots)
+        {
+            var inventory = Inspect(root);
+            invalid.AddRange(inventory.Invalid.Select(item => $"{role}: {item}"));
+            active.AddRange(inventory.Active);
+        }
+        if (invalid.Count > 0 || active.Count > 0)
+            throw new InvalidOperationException(
+                "Legacy reconciliation found unresolved/corrupt journals: " +
+                string.Join(" | ", invalid.Concat(active.Select(item => $"{item.Path} stage={item.Last.Stage}"))));
+
+        Directory.CreateDirectory(authoritativeRoot);
+        var marker = BuildMarker(options);
+        var path = MarkerPath(authoritativeRoot);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(marker) + Environment.NewLine);
+        using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough))
+        {
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+        }
+        ValidateLegacyReconciliationMarker(authoritativeRoot, options);
+        return path;
+    }
+
+    private static IReadOnlyDictionary<string, string> ResolveProtectedLegacyRoots(CleanSwitchOptions options)
+    {
+        var requested = new Dictionary<string, Guid>(StringComparer.Ordinal)
+        {
+            ["Boot1"] = RequireConfiguredGpt(options.Boot1PartitionGptId, "Boot1PartitionGptId"),
+            ["Boot2"] = RequireConfiguredGpt(options.Boot2PartitionGptId, "Boot2PartitionGptId")
+        };
+        var inventory = VolumeLocator.Enumerate();
+        var roots = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (role, gpt) in requested)
+        {
+            var matches = inventory.Volumes.Where(volume => volume.GptPartitionGuid == gpt).ToList();
+            if (matches.Count != 1)
+                throw new InvalidOperationException($"{role} GPT {VolumeLocator.FormatGptId(gpt)} resolved {matches.Count} times.");
+            var volumeRoot = matches[0].VolumeGuidPath;
+            try
+            {
+                _ = Directory.EnumerateFileSystemEntries(volumeRoot).Take(1).ToList();
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException($"{role} legacy ProgramData location is inaccessible.", exception);
+            }
+            roots[role] = System.IO.Path.Combine(volumeRoot, "ProgramData", "CleanSwitch", "WinRE", "deployments");
+        }
+        return roots;
+    }
+
+    private static Guid RequireConfiguredGpt(string value, string name) =>
+        VolumeLocator.TryParseGptId(value, out var id)
+            ? id
+            : throw new InvalidOperationException($"{name} must be configured before legacy reconciliation.");
+
+    private static string MarkerPath(string root) => System.IO.Path.Combine(root, "legacy-journal-reconciliation-v1.json");
+
+    private static LegacyJournalReconciliationMarker BuildMarker(CleanSwitchOptions options)
+    {
+        var unsigned = new LegacyJournalReconciliationMarker
+        {
+            SchemaVersion = 1,
+            Boot1PartitionGptId = options.Boot1PartitionGptId,
+            Boot2PartitionGptId = options.Boot2PartitionGptId,
+            CompletedAtUtc = DateTimeOffset.UtcNow,
+            RecordSha256 = string.Empty
+        };
+        return unsigned with { RecordSha256 = MarkerHash(unsigned) };
+    }
+
+    private static void ValidateLegacyReconciliationMarker(string root, CleanSwitchOptions options)
+    {
+        var path = MarkerPath(root);
+        if (!File.Exists(path))
+            throw new InvalidDataException("explicit --reconcile-legacy-winre-journals has not completed.");
+        var marker = JsonSerializer.Deserialize<LegacyJournalReconciliationMarker>(File.ReadAllText(path))
+            ?? throw new InvalidDataException("reconciliation marker is empty.");
+        if (marker.SchemaVersion != 1 ||
+            !string.Equals(marker.Boot1PartitionGptId, options.Boot1PartitionGptId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(marker.Boot2PartitionGptId, options.Boot2PartitionGptId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(marker.RecordSha256, MarkerHash(marker), StringComparison.Ordinal))
+            throw new InvalidDataException("reconciliation marker is corrupt, stale, or bound to different protected GPT identities.");
+    }
+
+    private static string MarkerHash(LegacyJournalReconciliationMarker marker)
+    {
+        var unsigned = marker with { RecordSha256 = string.Empty };
+        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(unsigned)));
+    }
+
+    public static WinReDeploymentJournalInventory InspectAuthoritativeRoots(
+        string authoritativeRoot,
+        string legacyRoot)
+    {
+        var authoritative = Inspect(authoritativeRoot);
+        if (string.Equals(
+                System.IO.Path.GetFullPath(authoritativeRoot),
+                System.IO.Path.GetFullPath(legacyRoot),
+                StringComparison.OrdinalIgnoreCase))
+            return authoritative;
+
+        var legacy = Inspect(legacyRoot);
+        var invalid = authoritative.Invalid.ToList();
+        invalid.AddRange(legacy.Invalid.Select(item => "Legacy ProgramData journal is invalid and requires operator review: " + item));
+        invalid.AddRange(legacy.Active.Select(item =>
+            $"Legacy ProgramData journal is unresolved and cannot be migrated automatically: {item.Path} " +
+            $"stage={item.Last.Stage} sequence={item.Last.Sequence}."));
+        return new WinReDeploymentJournalInventory(authoritative.Active, invalid);
+    }
+
+    public static WinReDeploymentJournalInventory Inspect(string root)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(root);
         try
         {
             if (!Directory.Exists(root))
@@ -308,4 +472,13 @@ public static class WinReDeploymentJournalDiscovery
             return new WinReDeploymentJournalInventory([], [$"{root}: journal discovery failed closed: {exception.Message}"]);
         }
     }
+}
+
+public sealed record LegacyJournalReconciliationMarker
+{
+    public int SchemaVersion { get; init; }
+    public required string Boot1PartitionGptId { get; init; }
+    public required string Boot2PartitionGptId { get; init; }
+    public DateTimeOffset CompletedAtUtc { get; init; }
+    public required string RecordSha256 { get; init; }
 }

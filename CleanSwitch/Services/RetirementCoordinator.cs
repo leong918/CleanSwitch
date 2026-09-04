@@ -90,6 +90,12 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
         _store.ValidateForNewOperation(boot1Identity);
 
         var existing = _store.TryLoad();
+        if (existing?.Status == RetirementStatus.RecoveryRequired)
+        {
+            throw new InvalidOperationException(
+                "The prior retirement is RECOVERY_REQUIRED and interlocked. Operator recovery is required before a new retirement can begin.");
+        }
+
         if (existing is not null && !existing.IsTerminal && existing.Status != RetirementStatus.Failed)
         {
             throw new RetirementStateException(
@@ -116,6 +122,7 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
             Boot1BcdObjectId = BcdIdentifiers.Format(boot1Bcd),
             Boot2BcdObjectId = BcdIdentifiers.Format(boot2Bcd),
             DestructiveDeletionPerformed = false,
+            HandoffAuthorizationState = HandoffAuthorizationStates.None,
             MachineName = Environment.MachineName,
             Boot1Identity = boot1Identity,
             Boot2Identity = boot2Identity,
@@ -239,8 +246,10 @@ public sealed class RetirementCoordinator : IRetirementCoordinator
             return state;
         }
 
-        if (state.DestructiveDeletionPerformed &&
-            state.Status is RetirementStatus.Boot1Retired or RetirementStatus.Phase2BReady)
+        if (state.Status is RetirementStatus.DestructiveIntent or RetirementStatus.RecoveryRequired ||
+            state.DestructiveDeletionPerformed && state.Status is
+                RetirementStatus.Phase2BReady or RetirementStatus.Boot1Retired or
+                RetirementStatus.BcdUpdated or RetirementStatus.Verified)
         {
             _log.Warn(
                 "coordinator",

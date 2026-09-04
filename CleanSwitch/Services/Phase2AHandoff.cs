@@ -4,7 +4,7 @@ using CleanSwitch.Recovery;
 namespace CleanSwitch.Services;
 
 /// <summary>
-/// Fail-closed Phase 2A coordinator. It captures a fresh schema-v2 operation, makes the
+/// Fail-closed Phase 2A coordinator. It captures a fresh schema-v3 operation, makes the
 /// configured Boot 2 loader the persistent default, selects WinRE for one boot, then restarts.
 /// It never performs disk or BCD deletion.
 /// </summary>
@@ -41,6 +41,8 @@ public sealed class Phase2AHandoff
         Phase2ARetirementGuard.Validate(layout, _options.Boot2Guid);
 
         RetirementState? state = null;
+        var bootSequenceMutationAttempted = false;
+        var committedPersisted = false;
         try
         {
             reportStage?.Invoke("Validating the configured recovery environment...");
@@ -97,6 +99,12 @@ public sealed class Phase2AHandoff
                 boot1Identity,
                 boot2Identity);
 
+            state.HandoffAuthorizationToken = Guid.NewGuid().ToString("D");
+            state.HandoffAuthorizationState = HandoffAuthorizationStates.Preparing;
+            state.HandoffRecoveryBcdObjectId = recovery.Identifier;
+            state.HandoffAuthorizationBindingSha256 = RetirementExecutionAuthorization.ComputeBinding(state);
+            state = _coordinator.Persist(state);
+
             // Third guard: no BCD mutation is reachable unless the persisted roles still match
             // the configured survivor contract.
             Phase2ARetirementGuard.Validate(layout, _options.Boot2Guid);
@@ -105,17 +113,26 @@ public sealed class Phase2AHandoff
             reportStage?.Invoke("Setting Boot 2 as the surviving default...");
             if (!await _bootManager.SetDefaultBootAsync(layout.Target.Identifier))
             {
-                throw new BootManagerException("BCDEdit did not confirm Boot 2 as the persistent default.");
+                throw new BootManagerException("BCDEdit did not read-back verify Boot 2 as the exact persistent default.");
             }
 
             reportStage?.Invoke("Setting the recovery environment as the next boot...");
+            bootSequenceMutationAttempted = true;
             if (!await _bootManager.SetNextBootAsync(recovery.Identifier))
             {
-                throw new BootManagerException("BCDEdit did not confirm WinRE as the one-time boot target.");
+                throw new BootManagerException("BCDEdit did not read-back verify WinRE as the exact one-time boot target.");
             }
+
+            state.HandoffAuthorizationState = HandoffAuthorizationStates.Armed;
+            state.HandoffArmedAtUtc = DateTimeOffset.UtcNow;
+            state = _coordinator.Persist(state);
 
             reportStage?.Invoke($"Restarting into the recovery environment in {_options.RestartDelaySeconds} second(s)...");
             await _bootManager.RestartAsync(_options.RestartDelaySeconds);
+            state.HandoffAuthorizationState = HandoffAuthorizationStates.Committed;
+            state.HandoffCommittedAtUtc = DateTimeOffset.UtcNow;
+            state = _coordinator.Persist(state);
+            committedPersisted = true;
             return state;
         }
         catch (Exception exception)
@@ -124,6 +141,38 @@ public sealed class Phase2AHandoff
             {
                 var failure = "Phase 2A failed closed before a confirmed restart: " + exception.Message;
                 _log.Warn("phase2a", failure);
+
+                if (bootSequenceMutationAttempted && !committedPersisted)
+                {
+                    try
+                    {
+                        if (!await _bootManager.ClearNextBootAsync())
+                            throw new BootManagerException("Bootsequence disarm readback did not prove absence.");
+                        state.HandoffAuthorizationState = HandoffAuthorizationStates.Disarmed;
+                        state.HandoffDisarmedAtUtc = DateTimeOffset.UtcNow;
+                        state = _coordinator.Persist(state);
+                    }
+                    catch (Exception disarmException)
+                    {
+                        var interlock =
+                            "Phase 2A failed after bootsequence arm and disarm could not be proven: " +
+                            disarmException.Message;
+                        state.HandoffAuthorizationState = HandoffAuthorizationStates.RecoveryRequired;
+                        state.LastError = interlock;
+                        try
+                        {
+                            _coordinator.Transition(state, RetirementStatus.RecoveryRequired, interlock);
+                        }
+                        catch (Exception auditException) when (
+                            auditException is RetirementStorageException or RetirementStateException)
+                        {
+                            _log.Warn("phase2a", "Could not persist the RECOVERY_REQUIRED interlock: " + auditException.Message);
+                        }
+
+                        throw new BootManagerException(interlock, new AggregateException(exception, disarmException));
+                    }
+                }
+
                 try
                 {
                     _coordinator.MarkFailed(state, failure);

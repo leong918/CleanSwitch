@@ -6,8 +6,13 @@ public interface IBootManager
 {
     Task<BootLayout> DetectAsync(string? preferredOtherGuid);
 
+    /// <summary>Sets and read-back verifies the exact one-shot boot sequence.</summary>
     Task<bool> SetNextBootAsync(string bootGuid);
 
+    /// <summary>Removes and read-back verifies the absence of any one-shot boot sequence.</summary>
+    Task<bool> ClearNextBootAsync();
+
+    /// <summary>Sets and read-back verifies the exact persistent default loader.</summary>
     Task<bool> SetDefaultBootAsync(string bootGuid);
 
     Task RestartAsync(int delaySeconds);

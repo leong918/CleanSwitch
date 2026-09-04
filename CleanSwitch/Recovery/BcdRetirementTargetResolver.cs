@@ -125,11 +125,12 @@ public static class BcdRetirementTargetResolver
                 : "Boot 1 BCD object is not the running {{current}} loader.");
 
         report.Add(
-            "target-is-not-default",
-            live.DefaultObjectId != expectedBoot1,
-            live.DefaultObjectId == expectedBoot1
-                ? "Boot 1 BCD object is the resolved {{default}} loader. Refusing to delete the default."
-                : "Boot 1 BCD object is not the default loader.");
+            "default-is-exact-boot2",
+            live.DefaultResolution == BcdAliasResolution.Resolved && live.DefaultObjectId == expectedBoot2,
+            live.DefaultObjectId == expectedBoot2
+                ? "{default} resolves exactly to the Boot 2 survivor."
+                : $"{{default}} must resolve exactly to Boot 2 {BcdIdentifiers.Format(expectedBoot2)}; observed " +
+                  (live.DefaultObjectId is null ? "<unresolved>." : BcdIdentifiers.Format(live.DefaultObjectId.Value) + "."));
 
         report.Add(
             "target-is-not-recovery-guid",
@@ -189,16 +190,15 @@ public static class BcdRetirementTargetResolver
             after.BootManagerPresent,
             after.BootManagerPresent ? "{bootmgr} is still present." : "{bootmgr} disappeared.");
 
-        var defaultOk = after.DefaultObjectId is Guid resolvedDefault &&
-                        (resolvedDefault == boot2 || approvedSurvivors.Contains(resolvedDefault));
+        var defaultOk = after.DefaultResolution == BcdAliasResolution.Resolved && after.DefaultObjectId == boot2;
         report.Add(
-            "default-is-approved-survivor",
+            "default-is-exact-boot2",
             defaultOk,
             after.DefaultObjectId is null
                 ? "{{default}} could not be resolved after delete."
                 : defaultOk
-                    ? $"{{default}} resolves to {BcdIdentifiers.Format(after.DefaultObjectId.Value)}."
-                    : $"{{default}} resolves to {BcdIdentifiers.Format(after.DefaultObjectId.Value)}, which is not an approved survivor.");
+                    ? $"{{default}} resolves exactly to Boot 2 {BcdIdentifiers.Format(boot2)}."
+                    : $"{{default}} resolves to {BcdIdentifiers.Format(after.DefaultObjectId.Value)}, not exact Boot 2 {BcdIdentifiers.Format(boot2)}.");
 
         var beforeIds = before.ConcreteObjectIds();
         var afterIds = after.ConcreteObjectIds();

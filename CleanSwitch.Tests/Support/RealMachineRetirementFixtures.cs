@@ -95,7 +95,8 @@ internal static class RealMachineRetirementFixtures
                     device: $"ramdisk=[F:]\\Recovery\\WindowsRE\\Winre.wim,{BcdIdentifiers.Format(Boot1WinReRamdisk)}",
                     osDevice: $"ramdisk=[F:]\\Recovery\\WindowsRE\\Winre.wim,{BcdIdentifiers.Format(Boot1WinReRamdisk)}"),
                 RamdiskOptions(Boot1WinReRamdisk),
-                Loader(Boot2Loader, "Boot 2 - Clean", resumeObject: Boot2Resume, recoverySequence: Boot2Recovery, device: "partition=D:"),
+                Loader(Boot2Loader, "Boot 2 - Clean", resumeObject: Boot2Resume, recoverySequence: Boot2Recovery,
+                    device: $"partition={{{Boot2Gpt:D}}}"),
                 Loader(Boot2Recovery, "Windows Recovery Environment", BcdObjectKind.RecoveryLoader, device: "ramdisk=[HarddiskVolume7]"),
                 Resume(Boot1Resume, "partition=C:", recoverySequence: Boot1Recovery),
                 Resume(Boot2Resume, "partition=D:", recoverySequence: Boot2Recovery),
@@ -119,7 +120,8 @@ internal static class RealMachineRetirementFixtures
                     device: $"ramdisk=[F:]\\Recovery\\WindowsRE\\Winre.wim,{BcdIdentifiers.Format(Boot1WinReRamdisk)}",
                     osDevice: $"ramdisk=[F:]\\Recovery\\WindowsRE\\Winre.wim,{BcdIdentifiers.Format(Boot1WinReRamdisk)}"),
                 RamdiskOptions(Boot1WinReRamdisk),
-                Loader(Boot2Loader, "Boot 2 - Clean", resumeObject: Boot2Resume, recoverySequence: Boot2Recovery, device: "partition=D:"),
+                Loader(Boot2Loader, "Boot 2 - Clean", resumeObject: Boot2Resume, recoverySequence: Boot2Recovery,
+                    device: $"partition={{{Boot2Gpt:D}}}"),
                 Loader(Boot2Recovery, "Windows Recovery Environment", BcdObjectKind.RecoveryLoader, device: "ramdisk=[HarddiskVolume7]"),
                 Resume(Boot2Resume, "partition=D:", recoverySequence: Boot2Recovery),
                 Loader(FirmwareBootMgr, "Firmware Boot Manager", BcdObjectKind.FirmwareBootManager)
@@ -151,6 +153,7 @@ internal static class RealMachineRetirementFixtures
             OsDevice = osDevice ?? device,
             ResumeObject = resumeObject is null ? string.Empty : BcdIdentifiers.Format(resumeObject.Value),
             RecoverySequence = recoverySequence is null ? string.Empty : BcdIdentifiers.Format(recoverySequence.Value),
+            SystemRoot = kind == BcdObjectKind.WindowsLoader ? @"\Windows" : string.Empty,
             Kind = kind
         };
 

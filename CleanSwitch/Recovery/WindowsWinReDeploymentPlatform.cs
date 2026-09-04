@@ -16,9 +16,17 @@ internal sealed record WinReProtectedBcdSnapshot(
 
 public static class WinReDeploymentPlanBuilder
 {
+    public static Task<WinReDeploymentPlan> BuildAsync(
+        CleanSwitchOptions options,
+        string preparedWimPath,
+        IOperationLog? log = null) =>
+        throw new InvalidOperationException(
+            "Expected original Winre.wim SHA256 is required as an explicit reviewed deployment input.");
+
     public static async Task<WinReDeploymentPlan> BuildAsync(
         CleanSwitchOptions options,
         string preparedWimPath,
+        string expectedOriginalWimSha256,
         IOperationLog? log = null)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -46,6 +54,16 @@ public static class WinReDeploymentPlanBuilder
         var bundle = JsonSerializer.Deserialize<PreparedWinReBundleManifest>(File.ReadAllText(bundlePath),
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
             ?? throw new InvalidOperationException("Prepared WIM bundle manifest is unreadable.");
+        var expectedOriginalHash = WinReDeploymentHashPolicy.RequireSha256(
+            expectedOriginalWimSha256,
+            "Expected original Winre.wim SHA256");
+        WinReDeploymentHashPolicy.RequireExpectedMatchesObserved(
+            bundle.ExpectedOriginalWimSha256,
+            bundle.ObservedOriginalWimSha256,
+            "Prepared WinRE bundle");
+        if (!string.Equals(expectedOriginalHash, bundle.ExpectedOriginalWimSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "The reviewed expected original Winre.wim SHA256 does not match the sealed prepared bundle.");
         if (bundle.SchemaVersion != PreparedWinReBundleManifest.CurrentSchemaVersion ||
             !string.Equals(bundle.PreparedWimFileName, Path.GetFileName(preparedWimPath), StringComparison.Ordinal) ||
             bundle.PreparedWimSize != new FileInfo(preparedWimPath).Length ||
@@ -74,7 +92,8 @@ public static class WinReDeploymentPlanBuilder
         if (!LauncherManifestMatches(bundle.Launcher, expected.Manifest) ||
             !string.Equals(Path.GetFullPath(bundle.OriginalLiveWimPath), Path.GetFullPath(liveWim), StringComparison.OrdinalIgnoreCase) ||
             bundle.OriginalLiveWimSize != new FileInfo(liveWim).Length ||
-            !string.Equals(bundle.OriginalLiveWimSha256, HashFile(liveWim), StringComparison.OrdinalIgnoreCase))
+            !string.Equals(expectedOriginalHash, HashFile(liveWim), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(bundle.OriginalLiveWimSha256, bundle.ObservedOriginalWimSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Prepared bundle is stale or belongs to another build, configuration, RecoveryGuid, or live WIM.");
 
         var located = LocateVolumeForPath(liveWim);
@@ -100,6 +119,8 @@ public static class WinReDeploymentPlanBuilder
             PreparedBundlePath = Path.GetFullPath(bundlePath),
             PreparedBundleSha256 = HashFile(bundlePath),
             LiveWimPath = liveFull,
+            ExpectedOriginalWimSha256 = expectedOriginalHash,
+            ObservedOriginalWimSha256 = bundle.ObservedOriginalWimSha256,
             OriginalWimSha256 = bundle.OriginalLiveWimSha256,
             BackupWimPath = Path.Combine(archive, "original", "Winre.wim"),
             IncomingWimPath = Path.Combine(recoveryDirectory, "Winre.wim.incoming"),
@@ -182,7 +203,8 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
             return Fail("Live WinRE or backup path does not resolve to its persisted GPT identity.");
         if (!HasDeploymentCapacity(plan, out var capacityDiagnostic)) return Fail(capacityDiagnostic);
         if (!HashEquals(plan.PreparedWimPath, plan.PreparedWimSha256) ||
-            !HashEquals(plan.LiveWimPath, plan.OriginalWimSha256))
+            !HashEquals(plan.LiveWimPath, plan.ExpectedOriginalWimSha256) ||
+            !string.Equals(plan.ExpectedOriginalWimSha256, plan.ObservedOriginalWimSha256, StringComparison.OrdinalIgnoreCase))
             return Fail("Prepared or original WIM hash drifted before deployment.");
 
         var statePath = RetirementStateStore.ResolveStateFilePath(_options);
@@ -241,13 +263,34 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
         Directory.CreateDirectory(Path.GetDirectoryName(plan.BackupWimPath)!);
         File.Copy(plan.LiveWimPath, plan.BackupWimPath, overwrite: false);
         FlushFile(plan.BackupWimPath);
-        if (!HashEquals(plan.BackupWimPath, plan.OriginalWimSha256)) return Fail("Original WIM backup hash mismatch.");
+        if (!HashEquals(plan.BackupWimPath, plan.ExpectedOriginalWimSha256)) return Fail("Original WIM backup hash mismatch.");
         var bcd = await CaptureProtectedBcdAsync(_log);
         if (!string.Equals(Fingerprint(bcd), plan.ProtectedBcdFingerprint, StringComparison.OrdinalIgnoreCase) ||
             !UnchangedStateAndGpt(plan))
             return Fail("BCD, retirement state, or GPT identity drifted before the first mutation.");
         var info = await RunRequiredAsync("dism.exe", ["/English", "/Get-WimInfo", $"/WimFile:{plan.BackupWimPath}"]);
         return info.ExitCode == 0 ? Pass("Original WIM backup is byte-exact and DISM-readable.") : Fail(LoggedProcess.Describe(info));
+    }
+
+    public async Task<WinReDeploymentVerification> VerifyFirstMutationAsync(WinReDeploymentPlan plan)
+    {
+        var paths = ValidatePlanPaths(plan);
+        if (!paths.Passed) return paths;
+        var registration = await VerifyRegistrationAndBcdAsync(plan, expectedEnabled: true, requireLocation: true);
+        if (!registration.Passed)
+            return Fail("Registered WinRE location, RecoveryGuid, GPT, state, or protected BCD changed before first mutation. " + registration.Detail);
+        var boot = new WindowsBootManager(_log);
+        var recovery = await new BootEntryValidator(boot, _log).ResolveRecoveryEntryAsync(plan.ExpectedRecoveryGuid);
+        if (recovery.Identifier is null || !BcdIdentifiers.IdsEqual(recovery.Identifier, plan.ExpectedRecoveryGuid))
+            return Fail("RecoveryGuid changed before first mutation.");
+        if (!HashEquals(plan.LiveWimPath, plan.ExpectedOriginalWimSha256))
+            return Fail("Live Winre.wim hash drifted after backup verification.");
+        if (!HashEquals(plan.BackupWimPath, plan.ExpectedOriginalWimSha256))
+            return Fail("Exact original Winre.wim backup hash drifted before first mutation.");
+        if (new FileInfo(plan.LiveWimPath).Length != new FileInfo(plan.BackupWimPath).Length)
+            return Fail("Live and backed-up original Winre.wim sizes differ before first mutation.");
+        return new WinReDeploymentVerification(true,
+            "Final registered location/GPT/RecoveryGuid and live+backup WIM hashes match.", recovery.Identifier);
     }
 
     public Task DisableAsync(WinReDeploymentPlan plan) => RunMutationAsync("reagentc.exe", ["/disable"]);
@@ -257,10 +300,10 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
 
     public Task RemoveOriginalAsync(WinReDeploymentPlan plan)
     {
-        if (!HashEquals(plan.BackupWimPath, plan.OriginalWimSha256)) throw new InvalidOperationException("Verified original backup is unavailable.");
+        if (!HashEquals(plan.BackupWimPath, plan.ExpectedOriginalWimSha256)) throw new InvalidOperationException("Verified original backup is unavailable.");
         if (File.Exists(plan.LiveWimPath))
         {
-            if (!HashEquals(plan.LiveWimPath, plan.OriginalWimSha256))
+            if (!HashEquals(plan.LiveWimPath, plan.ExpectedOriginalWimSha256))
                 throw new InvalidOperationException("Live original WIM drifted before removal.");
             File.Delete(plan.LiveWimPath);
         }
@@ -268,7 +311,7 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
     }
 
     public Task<WinReDeploymentVerification> VerifyOriginalRemovedAsync(WinReDeploymentPlan plan) =>
-        Task.FromResult(!File.Exists(plan.LiveWimPath) && HashEquals(plan.BackupWimPath, plan.OriginalWimSha256) && UnchangedStateAndGpt(plan)
+        Task.FromResult(!File.Exists(plan.LiveWimPath) && HashEquals(plan.BackupWimPath, plan.ExpectedOriginalWimSha256) && UnchangedStateAndGpt(plan)
             ? Pass("Original absent and verified backup present.") : Fail("Original-removal state is not proven."));
 
     public async Task CopyIncomingAsync(WinReDeploymentPlan plan, Action duringCopy)
@@ -355,7 +398,7 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
     {
         var pathValidation = ValidatePlanPaths(plan);
         if (!pathValidation.Passed) throw new InvalidOperationException(pathValidation.Detail);
-        if (!HashEquals(plan.BackupWimPath, plan.OriginalWimSha256))
+        if (!HashEquals(plan.BackupWimPath, plan.ExpectedOriginalWimSha256))
             throw new InvalidOperationException("Rollback refuses because the original backup hash is unavailable.");
 
         var info = await RunRequiredAsync("reagentc.exe", ["/info"]);
@@ -366,7 +409,7 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
         if (File.Exists(plan.LiveWimPath))
         {
             if (!HashEquals(plan.LiveWimPath, plan.PreparedWimSha256) &&
-                !HashEquals(plan.LiveWimPath, plan.OriginalWimSha256))
+                !HashEquals(plan.LiveWimPath, plan.ExpectedOriginalWimSha256))
                 throw new InvalidOperationException("Rollback found an unrecognized live WIM and will not overwrite it.");
             File.Delete(plan.LiveWimPath);
         }
@@ -375,7 +418,7 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
         if (File.Exists(rollbackIncoming)) File.Delete(rollbackIncoming);
         File.Copy(plan.BackupWimPath, rollbackIncoming, overwrite: false);
         FlushFile(rollbackIncoming);
-        if (!HashEquals(rollbackIncoming, plan.OriginalWimSha256))
+        if (!HashEquals(rollbackIncoming, plan.ExpectedOriginalWimSha256))
             throw new InvalidOperationException("Rollback incoming WIM hash mismatch.");
         File.Move(rollbackIncoming, plan.LiveWimPath);
         await RunMutationAsync("reagentc.exe", ["/setreimage", "/path", plan.RecoveryDirectory]);
@@ -384,7 +427,7 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
 
     public async Task<WinReDeploymentVerification> VerifyRollbackAsync(WinReDeploymentPlan plan)
     {
-        if (!HashEquals(plan.LiveWimPath, plan.OriginalWimSha256)) return Fail("Original live WIM hash was not restored.");
+        if (!HashEquals(plan.LiveWimPath, plan.ExpectedOriginalWimSha256)) return Fail("Original live WIM hash was not restored.");
         var info = await RunRequiredAsync("dism.exe", ["/English", "/Get-WimInfo", $"/WimFile:{plan.LiveWimPath}"]);
         if (info.ExitCode != 0) return Fail("Restored original WIM is not DISM-readable: " + LoggedProcess.Describe(info));
         var verification = await VerifyRegistrationAndBcdAsync(plan, expectedEnabled: true, requireLocation: true);

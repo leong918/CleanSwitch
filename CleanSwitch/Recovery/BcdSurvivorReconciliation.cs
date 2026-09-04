@@ -72,16 +72,15 @@ public static class BcdSurvivorReconciliation
             live.BootManagerPresent,
             live.BootManagerPresent ? "{bootmgr} is still present." : "{bootmgr} is missing.");
 
-        var defaultOk = live.DefaultObjectId is Guid resolvedDefault &&
-                        (resolvedDefault == boot2 || IsApprovedSurvivor(resolvedDefault, state, boot1ExclusiveIds, boot1));
+        var defaultOk = live.DefaultResolution == BcdAliasResolution.Resolved && live.DefaultObjectId == boot2;
         report.Add(
-            "default-is-approved-survivor",
+            "default-is-exact-boot2",
             defaultOk,
             live.DefaultObjectId is null
                 ? "{default} could not be resolved after delete."
                 : defaultOk
-                    ? $"{{default}} resolves to {BcdIdentifiers.Format(live.DefaultObjectId.Value)}."
-                    : $"{{default}} resolves to {BcdIdentifiers.Format(live.DefaultObjectId.Value)}, which is not an approved survivor.");
+                    ? $"{{default}} resolves exactly to Boot 2 {BcdIdentifiers.Format(boot2)}."
+                    : $"{{default}} resolves to {BcdIdentifiers.Format(live.DefaultObjectId.Value)}, not exact Boot 2 {BcdIdentifiers.Format(boot2)}.");
 
         var required = RequiredSurvivorIds(state, boot1ExclusiveIds, boot1);
         var missing = required.Where(id => live.WithObjectId(id).Count == 0).ToList();
@@ -120,10 +119,4 @@ public static class BcdSurvivorReconciliation
         return required;
     }
 
-    private static bool IsApprovedSurvivor(
-        Guid objectId,
-        RetirementState state,
-        IReadOnlySet<Guid> boot1ExclusiveIds,
-        Guid boot1BcdObjectId) =>
-        RequiredSurvivorIds(state, boot1ExclusiveIds, boot1BcdObjectId).Contains(objectId);
 }

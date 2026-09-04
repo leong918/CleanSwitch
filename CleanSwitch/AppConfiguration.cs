@@ -55,6 +55,9 @@ internal static class AppConfiguration
             options.RecoveryDataVolumeGptId = VolumeLocator.FormatGptId(gptPartitionId);
         }
 
+        options.Boot1PartitionGptId = NormalizeRequiredGpt(options.Boot1PartitionGptId, "CleanSwitch:Boot1PartitionGptId");
+        options.Boot2PartitionGptId = NormalizeRequiredGpt(options.Boot2PartitionGptId, "CleanSwitch:Boot2PartitionGptId");
+
         if (string.IsNullOrWhiteSpace(options.StateFileName))
         {
             options.StateFileName = CleanSwitchOptions.DefaultStateFileName;
@@ -64,6 +67,13 @@ internal static class AppConfiguration
         options.RecoveryDataFolderName = options.ResolveRecoveryDataFolderName();
 
         return options;
+    }
+
+    private static string NormalizeRequiredGpt(string value, string name)
+    {
+        if (!VolumeLocator.TryParseGptId(value, out var id))
+            throw new InvalidOperationException($"{name} must be a concrete GPT partition GUID.");
+        return VolumeLocator.FormatGptId(id);
     }
 
     private sealed class AppSettingsFile

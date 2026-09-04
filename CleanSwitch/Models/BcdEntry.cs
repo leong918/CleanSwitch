@@ -11,7 +11,8 @@ public sealed record BcdEntry(
     string OsDevice,
     string RecoverySequence,
     string ResumeObject,
-    string Type)
+    string Type,
+    string SystemRoot = "")
 {
     public bool IsWindowsLoader =>
         Path.Contains("winload", StringComparison.OrdinalIgnoreCase);

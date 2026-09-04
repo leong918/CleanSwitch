@@ -21,7 +21,7 @@ public enum RecoveryRunOutcome
     Failed
 }
 
-public sealed record RecoveryRunRequest(bool DryRun, bool ReviewOnly, bool ExecuteDeletion);
+public sealed record RecoveryRunRequest(bool DryRun, bool ReviewOnly, bool ExecuteDeletion, string? OperationToken = null);
 
 public sealed record RecoveryRunResult(RecoveryRunOutcome Outcome, string Message);
 
@@ -47,6 +47,7 @@ public sealed class RecoveryRunner
     private readonly IGptLayoutSource _layout;
     private readonly CleanSwitchOptions _options;
     private readonly IOperationLog _log;
+    private readonly IRecoveryRuntimeProof _runtimeProof;
 
     public RecoveryRunner(
         IBootManager bootManager,
@@ -58,7 +59,8 @@ public sealed class RecoveryRunner
         IOperationLog? log = null,
         RetirementHardwareReview? hardwareReview = null,
         IBcdStoreSource? bcdStore = null,
-        IGptLayoutSource? layout = null)
+        IGptLayoutSource? layout = null,
+        IRecoveryRuntimeProof? runtimeProof = null)
     {
         _bootManager = bootManager ?? throw new ArgumentNullException(nameof(bootManager));
         _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
@@ -73,6 +75,7 @@ public sealed class RecoveryRunner
             _log);
         _bcdStore = bcdStore ?? new BootManagerBcdStoreSource(bootManager);
         _layout = layout ?? new VolumeLocatorGptLayoutSource();
+        _runtimeProof = runtimeProof ?? new WindowsRecoveryRuntimeProof(_bcdStore);
     }
 
     public Task<RetirementResumePreviewResult> RunResumePreviewAsync(RetirementState state)
@@ -125,6 +128,15 @@ public sealed class RecoveryRunner
                 $"No retirement state file at '{_coordinator.StateFilePath}'. Nothing to do; no boot change made.";
             _log.Info("recovery", message);
             return new RecoveryRunResult(RecoveryRunOutcome.NothingToDo, message);
+        }
+
+        if (state.Status is RetirementStatus.Failed or RetirementStatus.Aborted or RetirementStatus.RecoveryRequired)
+        {
+            var message =
+                $"Automatic recovery execution is interlocked for {RetirementStatusNames.ToWire(state.Status)}. " +
+                "No destructive command, BCD mutation, or restart was attempted.";
+            _log.Warn("recovery", message);
+            return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
         }
 
         if (state.IsTerminal)
@@ -180,7 +192,8 @@ public sealed class RecoveryRunner
                 _bcdStore,
                 _layout,
                 _options,
-                _log);
+                _log,
+                _runtimeProof);
             return await production.RunAsync(state, request);
         }
 

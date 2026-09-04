@@ -42,14 +42,14 @@ public sealed class RetirementCoordinatorBcdCaptureTests
             RetirementFixtures.Boot2Identity());
 
         Assert.Equal(RetirementState.CurrentSchemaVersion, state.SchemaVersion);
-        Assert.Equal(2, state.SchemaVersion);
+        Assert.Equal(4, state.SchemaVersion);
         Assert.Equal(boot1, state.Boot1Id);
         Assert.Equal(boot2, state.Boot2Id);
         Assert.Equal(boot1, state.Boot1BcdObjectId);
         Assert.Equal(boot2, state.Boot2BcdObjectId);
 
         var json = File.ReadAllText(coordinator.StateFilePath);
-        Assert.Contains("\"schemaVersion\": 2", json, StringComparison.Ordinal);
+        Assert.Contains("\"schemaVersion\": 3", json, StringComparison.Ordinal);
         Assert.Contains("\"boot1BcdObjectId\":", json, StringComparison.Ordinal);
         Assert.Contains("\"boot2BcdObjectId\":", json, StringComparison.Ordinal);
         Assert.Contains(boot1, json, StringComparison.OrdinalIgnoreCase);
@@ -60,7 +60,7 @@ public sealed class RetirementCoordinatorBcdCaptureTests
         Assert.NotNull(loaded);
         Assert.Equal(boot1, loaded.Boot1BcdObjectId);
         Assert.Equal(boot2, loaded.Boot2BcdObjectId);
-        Assert.Equal(2, loaded.SchemaVersion);
+        Assert.Equal(4, loaded.SchemaVersion);
         AssertCompleteDestructiveIdentity(loaded.Boot1Identity, RetirementFixtures.Boot1Identity());
         AssertCompleteDestructiveIdentity(loaded.Boot2Identity, RetirementFixtures.Boot2Identity());
         Assert.Contains("\"diskGptUniqueId\":", json, StringComparison.Ordinal);

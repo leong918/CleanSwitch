@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using CleanSwitch.Models;
 using CleanSwitch.Recovery;
 
@@ -86,7 +87,38 @@ public sealed class WindowsBootManager : IBootManager
         }
 
         Trace.WriteLine($"BCDEdit successfully set the next one-time boot target to {normalizedGuid}.");
+        var readback = await ReadBootSequenceAsync();
+        if (readback.Count != 1 || !IdsEqual(readback[0], normalizedGuid))
+        {
+            throw new BootManagerException(
+                $"BCDEdit bootsequence readback was not exactly {normalizedGuid}. " +
+                $"Observed: {(readback.Count == 0 ? "<absent>" : string.Join(", ", readback))}.");
+        }
         _log.Info("bcdedit", $"One-time boot sequence set to {normalizedGuid}.");
+        return true;
+    }
+
+    public async Task<bool> ClearNextBootAsync()
+    {
+        var before = await ReadBootSequenceAsync();
+        if (before.Count == 0)
+        {
+            _log.Info("bcdedit", "One-time boot sequence was already absent.");
+            return true;
+        }
+
+        var result = await RunProcessAsync("bcdedit.exe", ["/deletevalue", "{bootmgr}", "bootsequence"]);
+        if (result.ExitCode != 0)
+            throw new BootManagerException("BCDEdit failed while removing bootsequence." + FormatProcessOutput(result));
+        var after = await ReadBootSequenceAsync();
+        if (after.Count != 0)
+        {
+            throw new BootManagerException(
+                "Could not prove that the one-time boot sequence was removed. " +
+                $"ExitCode={result.ExitCode}; observed={string.Join(", ", after)}.");
+        }
+
+        _log.Info("bcdedit", "One-time boot sequence removed and absence verified by readback.");
         return true;
     }
 
@@ -107,8 +139,39 @@ public sealed class WindowsBootManager : IBootManager
                 $"ExitCode={result.ExitCode}. {result.StdErr}".Trim());
         }
 
+        var defaultOutput = await ReadBcdEditOutputAsync(["/enum", "{default}", "/v"]);
+        var defaults = BcdEditTextParser.Parse(defaultOutput)
+            .Where(entry => BcdIdentifiers.TryParseObjectId(entry.Identifier, out _))
+            .ToList();
+        if (defaults.Count != 1 || !IdsEqual(defaults[0].Identifier, normalizedGuid))
+        {
+            throw new BootManagerException(
+                $"Persistent default readback was not exactly {normalizedGuid}. " +
+                $"Observed: {(defaults.Count == 0 ? "<unresolved>" : string.Join(", ", defaults.Select(entry => entry.Identifier)))}.");
+        }
+
         _log.Info("bcdedit", $"Persistent default boot loader set to survivor {normalizedGuid}.");
         return true;
+    }
+
+    private async Task<IReadOnlyList<string>> ReadBootSequenceAsync()
+    {
+        var output = await ReadBcdEditOutputAsync(["/enum", "{bootmgr}", "/v"]);
+        var parsed = BcdBootSequenceParser.Parse(output);
+        if (!parsed.Confident)
+            throw new BootManagerException("Could not positively verify bootsequence: " + parsed.Diagnostic);
+        if (parsed.PropertyPresent && parsed.Identifiers.Count == 0)
+            throw new BootManagerException("Bootsequence property was present but contained no parseable identifier.");
+        return parsed.Identifiers;
+    }
+
+    private static void AddConcreteIds(string text, List<string> result)
+    {
+        foreach (Match match in Regex.Matches(text, @"\{[0-9a-fA-F-]{36}\}"))
+        {
+            if (BcdIdentifiers.TryParseObjectId(match.Value, out var objectId))
+                result.Add(BcdIdentifiers.Format(objectId));
+        }
     }
 
     public async Task<IReadOnlyList<BcdEntry>> EnumerateAsync(string scope)

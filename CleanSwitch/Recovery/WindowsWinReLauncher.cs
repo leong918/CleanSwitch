@@ -248,8 +248,15 @@ public sealed class WindowsWinReLauncherProvisioner
         _copier = copier ?? throw new ArgumentNullException(nameof(copier));
     }
 
+    public Task<WinReLauncherValidationResult> ProvisionAsync(
+        RecoveryEntryResolution recovery,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException(
+            "Expected original Winre.wim SHA256 is required as an explicit reviewed provisioning input.");
+
     public async Task<WinReLauncherValidationResult> ProvisionAsync(
         RecoveryEntryResolution recovery,
+        string expectedOriginalWimSha256,
         CancellationToken cancellationToken = default)
     {
         var diagnostic = "Recovery entry is incomplete.";
@@ -260,6 +267,15 @@ public sealed class WindowsWinReLauncherProvisioner
             rejected.Fail("recovery-image-resolved", diagnostic);
             return new WinReLauncherValidationResult(rejected);
         }
+
+        var expectedHash = WinReDeploymentHashPolicy.RequireSha256(
+            expectedOriginalWimSha256,
+            "Expected original Winre.wim SHA256");
+        var observedHash = HashFile(imagePath);
+        WinReDeploymentHashPolicy.RequireExpectedMatchesObserved(
+            expectedHash,
+            observedHash,
+            "WinRE launcher preparation preflight");
 
         var expected = WindowsWinReLauncherValidator.CreateCurrentExpectation(_options, recovery.Identifier);
         var report = new ValidationReport("WinRE CleanSwitch launcher prepared image");
@@ -317,7 +333,9 @@ public sealed class WindowsWinReLauncherProvisioner
                 PreparedWimSha256 = HashFile(workspace.PreparedImagePath),
                 OriginalLiveWimPath = Path.GetFullPath(imagePath),
                 OriginalLiveWimSize = new FileInfo(imagePath).Length,
-                OriginalLiveWimSha256 = HashFile(imagePath),
+                OriginalLiveWimSha256 = observedHash,
+                ExpectedOriginalWimSha256 = expectedHash,
+                ObservedOriginalWimSha256 = observedHash,
                 Launcher = expected.Manifest
             };
             WriteBundleDurably(preparedBundlePath, bundle);

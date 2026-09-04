@@ -7,6 +7,10 @@ public sealed class CleanSwitchOptions
     /// <summary>Optional. The other Windows loader to switch to when more than two exist.</summary>
     public string Boot2Guid { get; set; } = string.Empty;
 
+    public string Boot1PartitionGptId { get; set; } = string.Empty;
+
+    public string Boot2PartitionGptId { get; set; } = string.Empty;
+
     /// <summary>
     /// BCD identifier of the Windows Recovery Environment entry the RETIRE SYSTEM flow boots
     /// into. Find it with <c>bcdedit /enum all /v</c> from an elevated prompt. When empty,

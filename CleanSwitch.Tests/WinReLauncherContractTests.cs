@@ -20,7 +20,7 @@ public sealed class WinReLauncherContractTests
         Assert.True(report.Passed, report.Describe());
         Assert.Contains(report.Checks, check => check.Name == "launcher-official-entrypoint" && check.Passed);
         Assert.Equal(
-            ["--recovery-run", "--execute-deletion"],
+            ["--recovery-launch"],
             fixture.Expectation.Manifest.Arguments);
     }
 
@@ -157,7 +157,7 @@ public sealed class WinReLauncherContractTests
         File.WriteAllText(
             Path.Combine(fixture.Root, WinReLauncherContract.WinpeshlRelativePath),
             "[LaunchApps]\r\n" +
-            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-run --execute-deletion\r\n" +
+            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-launch\r\n" +
             "%SYSTEMROOT%\\System32\\recenv.exe\r\n");
 
         var report = fixture.Validate();
@@ -185,7 +185,7 @@ public sealed class WinReLauncherContractTests
     public void Launchapps_order_is_recovery_runner_then_stock_recenv()
     {
         var runner = WinReLauncherContract.WinpeshlContents.IndexOf(
-            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-run --execute-deletion",
+            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-launch",
             StringComparison.Ordinal);
         var fallback = WinReLauncherContract.WinpeshlContents.IndexOf(
             WinReLauncherContract.FallbackExecutableRuntimePath,
