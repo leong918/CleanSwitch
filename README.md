@@ -426,6 +426,11 @@ CleanSwitch.exe --complete-winre-smoke --receipt <receipt.json>
 Only that step makes the deployment journal terminal. `--recovery-run --execute-deletion`
 remains exclusively the real PENDING retirement entry point.
 
+Disposable real-VM validation uses the provider-neutral, fail-closed harness contract in
+[`docs/WINRE-VM-HARNESS.md`](docs/WINRE-VM-HARNESS.md). It requires an operator-supplied
+hypervisor adapter, dual disposable attestation, file-backed guest disks under approved
+storage roots, and a demonstrated checkpoint restore; it never falls back to this host.
+
 Phase 2A repeats the complete read-only proof against a fresh byte-exact WIM copy on every
 RETIRE SYSTEM attempt. A stock,
 missing, stale, ambiguous, or differently hashed launcher fails before a new operation is

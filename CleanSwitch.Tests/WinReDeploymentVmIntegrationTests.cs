@@ -10,6 +10,8 @@ public sealed class WinReDeploymentVmIntegrationTests
     public async Task Three_disposable_VM_cycles_prepare_deploy_review_smoke_and_restore_original()
     {
         var harness = Environment.GetEnvironmentVariable("CLEAN_SWITCH_WINRE_DEPLOYMENT_VM_HARNESS")!;
+        Assert.EndsWith("winre-vm-harness.ps1", Path.GetFileName(harness),
+            StringComparison.OrdinalIgnoreCase);
         for (var cycle = 1; cycle <= 3; cycle++)
         {
             var output = Path.Combine(Path.GetTempPath(), $"cleanswitch-winre-vm-cycle-{Guid.NewGuid():N}.json");
