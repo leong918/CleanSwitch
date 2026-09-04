@@ -5,6 +5,7 @@ using Xunit.Abstractions;
 
 namespace CleanSwitch.Tests;
 
+[Collection(VhdIntegrationCollection.Name)]
 public sealed class VhdDestructiveIntegrationTests
 {
     private readonly ITestOutputHelper _output;
