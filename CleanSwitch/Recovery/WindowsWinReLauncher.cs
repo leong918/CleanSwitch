@@ -109,6 +109,7 @@ public sealed class WindowsWinReLauncherValidator : IWinReLauncherValidator
     private readonly IWinReWorkspaceFactory _workspaceFactory;
     private readonly IWinReDismRunner _dism;
     private readonly IWinReFileCopier _copier;
+    private readonly string? _sourceExecutablePath;
 
     public WindowsWinReLauncherValidator(CleanSwitchOptions options, IOperationLog? log = null)
         : this(options, log, new WindowsWinReWorkspaceFactory(), new LoggedWinReDismRunner(), new WinReFileCopier())
@@ -120,13 +121,15 @@ public sealed class WindowsWinReLauncherValidator : IWinReLauncherValidator
         IOperationLog? log,
         IWinReWorkspaceFactory workspaceFactory,
         IWinReDismRunner dism,
-        IWinReFileCopier copier)
+        IWinReFileCopier copier,
+        string? sourceExecutablePath = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _log = log ?? NullOperationLog.Instance;
         _workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
         _dism = dism ?? throw new ArgumentNullException(nameof(dism));
         _copier = copier ?? throw new ArgumentNullException(nameof(copier));
+        _sourceExecutablePath = sourceExecutablePath;
     }
 
     public async Task<WinReLauncherValidationResult> ValidateAsync(
@@ -153,7 +156,7 @@ public sealed class WindowsWinReLauncherValidator : IWinReLauncherValidator
         WinReLauncherExpectation expected;
         try
         {
-            expected = CreateCurrentExpectation(_options, recovery.Identifier);
+            expected = CreateCurrentExpectation(_options, recovery.Identifier, _sourceExecutablePath);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
@@ -201,12 +204,17 @@ public sealed class WindowsWinReLauncherValidator : IWinReLauncherValidator
         return new WinReLauncherValidationResult(report, imagePath);
     }
 
-    internal static WinReLauncherExpectation CreateCurrentExpectation(CleanSwitchOptions options, string recoveryGuid)
+    internal static WinReLauncherExpectation CreateCurrentExpectation(
+        CleanSwitchOptions options,
+        string recoveryGuid,
+        string? sourceExecutablePath = null)
     {
-        var executable = Environment.ProcessPath;
-        if (string.IsNullOrWhiteSpace(executable))
+        var executable = sourceExecutablePath ??
+            Path.Combine(AppContext.BaseDirectory, WinReLauncherContract.RecoveryExecutableFileName);
+        if (!File.Exists(executable))
         {
-            throw new InvalidOperationException("The current CleanSwitch executable path is unavailable.");
+            throw new InvalidOperationException(
+                $"The dedicated WinRE recovery executable is unavailable: '{executable}'.");
         }
 
         return WinReLauncherContract.CreateExpectation(
@@ -228,6 +236,7 @@ public sealed class WindowsWinReLauncherProvisioner
     private readonly IWinReWorkspaceFactory _workspaceFactory;
     private readonly IWinReDismRunner _dism;
     private readonly IWinReFileCopier _copier;
+    private readonly string? _sourceExecutablePath;
 
     public WindowsWinReLauncherProvisioner(CleanSwitchOptions options, IOperationLog? log = null)
         : this(options, log, new WindowsWinReWorkspaceFactory(), new LoggedWinReDismRunner(), new WinReFileCopier())
@@ -239,13 +248,15 @@ public sealed class WindowsWinReLauncherProvisioner
         IOperationLog? log,
         IWinReWorkspaceFactory workspaceFactory,
         IWinReDismRunner dism,
-        IWinReFileCopier copier)
+        IWinReFileCopier copier,
+        string? sourceExecutablePath = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _log = log ?? NullOperationLog.Instance;
         _workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
         _dism = dism ?? throw new ArgumentNullException(nameof(dism));
         _copier = copier ?? throw new ArgumentNullException(nameof(copier));
+        _sourceExecutablePath = sourceExecutablePath;
     }
 
     public Task<WinReLauncherValidationResult> ProvisionAsync(
@@ -277,7 +288,8 @@ public sealed class WindowsWinReLauncherProvisioner
             observedHash,
             "WinRE launcher preparation preflight");
 
-        var expected = WindowsWinReLauncherValidator.CreateCurrentExpectation(_options, recovery.Identifier);
+        var expected = WindowsWinReLauncherValidator.CreateCurrentExpectation(
+            _options, recovery.Identifier, _sourceExecutablePath);
         var report = new ValidationReport("WinRE CleanSwitch launcher prepared image");
         var workspace = _workspaceFactory.Create(new FileInfo(imagePath).Length);
         var preservePreparedImage = false;

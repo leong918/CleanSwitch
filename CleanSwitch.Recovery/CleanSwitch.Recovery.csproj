@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>CleanSwitch.Recovery</AssemblyName>
+    <RootNamespace>CleanSwitch</RootNamespace>
+    <ApplicationManifest>..\CleanSwitch\app.manifest</ApplicationManifest>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="RecoveryHostServices.cs" />
+    <Compile Include="..\CleanSwitch\AppConfiguration.cs" Link="AppConfiguration.cs" />
+    <Compile Include="..\CleanSwitch\Models\**\*.cs" Link="Models\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="..\CleanSwitch\Services\**\*.cs"
+             Exclude="..\CleanSwitch\Services\Phase2AHandoff.cs;..\CleanSwitch\Services\RetirementServices.cs;..\CleanSwitch\Services\RetirementAbandoner.cs"
+             Link="Services\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="..\CleanSwitch\Recovery\**\*.cs"
+             Exclude="..\CleanSwitch\Recovery\PendingHandoffRepair.cs;..\CleanSwitch\Recovery\WinRe*.cs;..\CleanSwitch\Recovery\WindowsWinRe*.cs"
+             Link="Recovery\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

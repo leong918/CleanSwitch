@@ -112,7 +112,7 @@ public sealed class WinReLauncherContractTests
         fixture.WriteValidPayload();
         File.WriteAllText(
             Path.Combine(fixture.Root, WinReLauncherContract.WinpeshlRelativePath),
-            "[LaunchApps]\r\n%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe\r\n");
+            "[LaunchApps]\r\n%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.Recovery.exe\r\n");
         fixture.RewriteManifest(manifest => manifest with { Arguments = [] });
 
         var report = fixture.Validate();
@@ -157,7 +157,7 @@ public sealed class WinReLauncherContractTests
         File.WriteAllText(
             Path.Combine(fixture.Root, WinReLauncherContract.WinpeshlRelativePath),
             "[LaunchApps]\r\n" +
-            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-launch\r\n" +
+            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.Recovery.exe, --recovery-launch\r\n" +
             "%SYSTEMROOT%\\System32\\recenv.exe\r\n");
 
         var report = fixture.Validate();
@@ -185,7 +185,7 @@ public sealed class WinReLauncherContractTests
     public void Launchapps_order_is_recovery_runner_then_stock_recenv()
     {
         var runner = WinReLauncherContract.WinpeshlContents.IndexOf(
-            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-launch",
+            "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.Recovery.exe, --recovery-launch",
             StringComparison.Ordinal);
         var fallback = WinReLauncherContract.WinpeshlContents.IndexOf(
             WinReLauncherContract.FallbackExecutableRuntimePath,

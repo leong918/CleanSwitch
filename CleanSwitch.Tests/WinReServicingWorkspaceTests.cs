@@ -223,7 +223,8 @@ public sealed class WinReServicingWorkspaceTests
                 NullOperationLog.Instance,
                 factory,
                 new LoggedWinReDismRunner(),
-                new WinReFileCopier());
+                new WinReFileCopier(),
+                Environment.ProcessPath);
 
             var result = await provisioner.ProvisionAsync(recovery, sourceBefore);
 
@@ -525,9 +526,11 @@ public sealed class WinReServicingWorkspaceTests
             options.RecoveryDataVolumeGptId = "{47c8a288-ae3d-4aca-b1ab-d4deceae9d02}";
             options.RecoveryDataFolderName = "CleanSwitchData";
             var provisioner = new WindowsWinReLauncherProvisioner(
-                options, NullOperationLog.Instance, factory, dism, copier ?? new WinReFileCopier());
+                options, NullOperationLog.Instance, factory, dism, copier ?? new WinReFileCopier(),
+                Environment.ProcessPath);
             var validator = new WindowsWinReLauncherValidator(
-                options, NullOperationLog.Instance, factory, dism, new WinReFileCopier());
+                options, NullOperationLog.Instance, factory, dism, new WinReFileCopier(),
+                Environment.ProcessPath);
             return new PipelineFixture(root, sourceWim, recovery, factory, dism, provisioner, validator);
         }
 

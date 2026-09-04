@@ -89,14 +89,14 @@ public static class WinReLauncherProvisioningGuard
 }
 
 /// <summary>
-/// Immutable contract for the code that WinPE launches. The embedded executable is the same
-/// approved single-file build that starts Phase 2A. Its appsettings locates retirement state
+/// Immutable contract for the dedicated recovery-only code that WinPE launches. Its appsettings locates retirement state
 /// by RecoveryDataVolumeGptId; no installed-Windows drive letter is part of the contract.
 /// </summary>
 public static class WinReLauncherContract
 {
     public const string PayloadDirectory = "CleanSwitchRecovery";
-    public const string ExecutableRelativePath = PayloadDirectory + @"\CleanSwitch.exe";
+    public const string RecoveryExecutableFileName = "CleanSwitch.Recovery.exe";
+    public const string ExecutableRelativePath = PayloadDirectory + @"\" + RecoveryExecutableFileName;
     public const string ConfigurationRelativePath = PayloadDirectory + @"\appsettings.json";
     public const string ManifestRelativePath = PayloadDirectory + @"\winre-launcher-manifest.json";
     public const string WinpeshlRelativePath = @"Windows\System32\winpeshl.ini";
@@ -108,7 +108,7 @@ public static class WinReLauncherContract
 
     public static readonly string WinpeshlContents =
         "[LaunchApps]\r\n" +
-        "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-launch\r\n" +
+        "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.Recovery.exe, --recovery-launch\r\n" +
         FallbackExecutableRuntimePath + "\r\n";
 
     private static readonly JsonSerializerOptions JsonOptions = new()

@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CleanSwitch", "CleanSwitch\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CleanSwitch.Tests", "CleanSwitch.Tests\CleanSwitch.Tests.csproj", "{1447B44D-6D6A-4BEB-B891-7D08188EAB9A}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CleanSwitch.Recovery", "CleanSwitch.Recovery\CleanSwitch.Recovery.csproj", "{9BA2563F-82C5-40E2-A0BF-790948659015}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +26,9 @@ Global
 		{1447B44D-6D6A-4BEB-B891-7D08188EAB9A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{1447B44D-6D6A-4BEB-B891-7D08188EAB9A}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{1447B44D-6D6A-4BEB-B891-7D08188EAB9A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9BA2563F-82C5-40E2-A0BF-790948659015}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9BA2563F-82C5-40E2-A0BF-790948659015}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9BA2563F-82C5-40E2-A0BF-790948659015}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9BA2563F-82C5-40E2-A0BF-790948659015}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

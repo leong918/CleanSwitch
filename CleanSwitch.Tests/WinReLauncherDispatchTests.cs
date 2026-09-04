@@ -34,9 +34,25 @@ public sealed class WinReLauncherDispatchTests
     public void Verified_launcher_invokes_recovery_runner_with_explicit_runtime_opt_in()
     {
         Assert.Equal(["--recovery-launch"], WinReLauncherContract.RecoveryArguments);
-        var program = File.ReadAllText(FindRepoFile("CleanSwitch", "Program.cs"));
-        Assert.Contains("return RunRecoverySide(new RecoveryRunRequest(", program, StringComparison.Ordinal);
-        Assert.Contains("ExecuteDeletion: executeDeletion && !reviewOnly", program, StringComparison.Ordinal);
+        Assert.Equal(@"CleanSwitchRecovery\CleanSwitch.Recovery.exe", WinReLauncherContract.ExecutableRelativePath);
+        var program = File.ReadAllText(FindRepoFile("CleanSwitch.Recovery", "Program.cs"));
+        Assert.Contains("new RecoveryRunRequest(false, false, true, state.HandoffAuthorizationToken)",
+            program, StringComparison.Ordinal);
+        Assert.Contains("args.Length != 1", program, StringComparison.Ordinal);
+        Assert.DoesNotContain("MainForm", program, StringComparison.Ordinal);
+        Assert.DoesNotContain("WinReDeployment", program, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Dedicated_recovery_host_excludes_WinForms_and_links_production_safety_code()
+    {
+        var project = File.ReadAllText(FindRepoFile("CleanSwitch.Recovery", "CleanSwitch.Recovery.csproj"));
+
+        Assert.DoesNotContain("UseWindowsForms", project, StringComparison.Ordinal);
+        Assert.Contains("..\\CleanSwitch\\Recovery\\**\\*.cs", project, StringComparison.Ordinal);
+        Assert.Contains("..\\CleanSwitch\\Services\\**\\*.cs", project, StringComparison.Ordinal);
+        Assert.Contains("CLEANSWITCH_LIVE_TEST_BUILD", File.ReadAllText(FindRepoFile("Directory.Build.props")),
+            StringComparison.Ordinal);
     }
 
     [Fact]
