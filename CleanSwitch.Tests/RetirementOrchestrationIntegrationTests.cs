@@ -72,18 +72,18 @@ public sealed class RetirementOrchestrationIntegrationTests(ITestOutputHelper ou
                 layout);
 
             Assert.Equal(
-                ["--recovery-run", "--execute-deletion"],
+                ["--recovery-launch"],
                 WinReLauncherContract.RecoveryArguments);
             var result = await runner.RunAsync(
                 new RecoveryRunRequest(DryRun: true, ReviewOnly: false, ExecuteDeletion: true));
 
             output.WriteLine(result.Message);
             Assert.Equal(RecoveryRunOutcome.DryRunCompleted, result.Outcome);
-            Assert.Equal(1, diskCommand.ExecuteCount);
-            Assert.Equal(RetirementStatus.BcdUpdated, coordinator.State!.Status);
-            Assert.True(coordinator.State.DestructiveDeletionPerformed);
-            Assert.True(coordinator.State.BcdDeletionPerformed);
-            Assert.Empty(vhd.CaptureLayout().WithGptId(vhd.Boot1.PartitionGptId));
+            Assert.Equal(0, diskCommand.ExecuteCount);
+            Assert.Equal(RetirementStatus.Phase2BReady, coordinator.State!.Status);
+            Assert.False(coordinator.State.DestructiveDeletionPerformed);
+            Assert.False(coordinator.State.BcdDeletionPerformed);
+            Assert.Single(vhd.CaptureLayout().WithGptId(vhd.Boot1.PartitionGptId));
             var afterBcd = await bcdStore.CaptureAsync();
             Assert.Empty(afterBcd.WithObjectId(bcd.Boot1Id));
             Assert.Single(afterBcd.WithObjectId(bcd.Boot2Id));

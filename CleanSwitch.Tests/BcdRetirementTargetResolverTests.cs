@@ -128,7 +128,7 @@ public sealed class BcdRetirementTargetResolverTests
             null,
             BcdFixtures.StandardSnapshot(defaultId: BcdFixtures.Boot1));
 
-        AssertFailed(result, "target-is-not-default");
+        AssertFailed(result, "default-is-exact-boot2");
     }
 
     [Fact]

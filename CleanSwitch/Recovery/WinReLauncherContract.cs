@@ -39,7 +39,7 @@ public sealed record WinReLauncherValidationResult(
 
 public sealed record PreparedWinReBundleManifest
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
     public int SchemaVersion { get; init; } = CurrentSchemaVersion;
     public required string BundleId { get; init; }
     public required DateTimeOffset CreatedAtUtc { get; init; }
@@ -49,6 +49,8 @@ public sealed record PreparedWinReBundleManifest
     public required string OriginalLiveWimPath { get; init; }
     public required long OriginalLiveWimSize { get; init; }
     public required string OriginalLiveWimSha256 { get; init; }
+    public required string ExpectedOriginalWimSha256 { get; init; }
+    public required string ObservedOriginalWimSha256 { get; init; }
     public required WinReLauncherManifest Launcher { get; init; }
 }
 
@@ -74,7 +76,7 @@ public static class WinReLauncherProvisioningGuard
             throw new InvalidOperationException(
                 "WinRE launcher provisioning requires DestructiveOperationsImplemented=true, " +
                 "BcdOperationsImplemented=true, and EnableDestructiveRetirement=true because the launcher " +
-                "explicitly supplies --execute-deletion.");
+                "contains the guarded recovery-launch bootstrap.");
         }
 
         if (existingState is not null && !existingState.IsTerminal)
@@ -102,11 +104,11 @@ public static class WinReLauncherContract
     public const string FallbackExecutableRuntimePath = @"%SYSTEMDRIVE%\sources\recovery\RecEnv.exe";
 
     public static readonly IReadOnlyList<string> RecoveryArguments =
-        ["--recovery-run", "--execute-deletion"];
+        ["--recovery-launch"];
 
     public static readonly string WinpeshlContents =
         "[LaunchApps]\r\n" +
-        "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-run --execute-deletion\r\n" +
+        "%SYSTEMDRIVE%\\CleanSwitchRecovery\\CleanSwitch.exe, --recovery-launch\r\n" +
         FallbackExecutableRuntimePath + "\r\n";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -299,7 +301,7 @@ public static class WinReLauncherContract
             string.Equals(actual, expected, StringComparison.Ordinal),
             string.Equals(actual, expected, StringComparison.Ordinal)
                 ? "winpeshl.ini invokes only the verified recovery runner payload, then recenv.exe as a fail-closed fallback."
-                : "winpeshl.ini is stale, ambiguous, or does not exactly invoke '--recovery-run --execute-deletion'.");
+                : "winpeshl.ini is stale, ambiguous, or does not exactly invoke the recovery-launch bootstrap.");
     }
 
     private static void ValidateHash(ValidationReport report, string name, string path, string expected)

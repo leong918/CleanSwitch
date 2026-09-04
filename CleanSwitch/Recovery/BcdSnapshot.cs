@@ -43,6 +43,8 @@ public sealed class BcdEntryIdentity
 
     public string Type { get; init; } = string.Empty;
 
+    public string SystemRoot { get; init; } = string.Empty;
+
     public BcdObjectKind Kind { get; init; }
 
     public bool IdentifierWasAlias { get; init; }
@@ -68,6 +70,7 @@ public sealed class BcdEntryIdentity
             RecoverySequence = entry.RecoverySequence,
             ResumeObject = entry.ResumeObject,
             Type = entry.Type,
+            SystemRoot = entry.SystemRoot,
             Kind = Classify(entry, objectId),
             IdentifierWasAlias = wasAlias
         };

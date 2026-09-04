@@ -18,6 +18,7 @@ public sealed class ProductionRetirementExecution
     private readonly IGptLayoutSource _layout;
     private readonly CleanSwitchOptions _options;
     private readonly IOperationLog _log;
+    private readonly IRecoveryRuntimeProof _runtimeProof;
 
     public ProductionRetirementExecution(
         IBootManager bootManager,
@@ -28,7 +29,8 @@ public sealed class ProductionRetirementExecution
         IBcdStoreSource bcdStore,
         IGptLayoutSource layout,
         CleanSwitchOptions options,
-        IOperationLog log)
+        IOperationLog log,
+        IRecoveryRuntimeProof? runtimeProof = null)
     {
         _bootManager = bootManager;
         _coordinator = coordinator;
@@ -39,11 +41,26 @@ public sealed class ProductionRetirementExecution
         _layout = layout;
         _options = options;
         _log = log;
+        _runtimeProof = runtimeProof ?? new WindowsRecoveryRuntimeProof(bcdStore);
     }
 
     public async Task<RecoveryRunResult> RunAsync(RetirementState state, RecoveryRunRequest request)
     {
-        if (state.Status is RetirementStatus.Pending or RetirementStatus.Failed)
+        if (state.Status is RetirementStatus.Failed or RetirementStatus.Aborted or RetirementStatus.RecoveryRequired or RetirementStatus.Complete)
+        {
+            return new RecoveryRunResult(
+                RecoveryRunOutcome.Failed,
+                $"Production retirement is interlocked for {RetirementStatusNames.ToWire(state.Status)}. No mutation was attempted.");
+        }
+
+        if (!request.DryRun && request.ExecuteDeletion)
+            RetirementExecutionAuthorization.RequireCommitted(
+                state, _options, request.OperationToken, await _runtimeProof.CaptureAsync());
+
+        if (state.Status == RetirementStatus.DestructiveIntent)
+            return await ResumeDestructiveIntentAsync(state, request);
+
+        if (state.Status == RetirementStatus.Pending)
         {
             state = _coordinator.Transition(
                 state,
@@ -60,6 +77,10 @@ public sealed class ProductionRetirementExecution
         {
             return await ResumeAfterBoot1RetiredAsync(state, request);
         }
+
+        if (state.Status is not (RetirementStatus.RecoveryStarted or RetirementStatus.Phase2BReady))
+            return InterlockRecoveryRequired(state,
+                $"Production execution cannot continue safely from {RetirementStatusNames.ToWire(state.Status)}.");
 
         if (!request.ExecuteDeletion)
         {
@@ -88,12 +109,15 @@ public sealed class ProductionRetirementExecution
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
         }
 
-        SurvivorInventoryCapture.ApplyToState(state, beforeBcd, _layout);
-        state.Phase = "2B-ready";
-        state = _coordinator.Transition(
-            state,
-            RetirementStatus.Phase2BReady,
-            "Pre-execution review passed. Survivor inventory captured before any delete.");
+        if (state.Status == RetirementStatus.RecoveryStarted)
+        {
+            SurvivorInventoryCapture.ApplyToState(state, beforeBcd, _layout);
+            state.Phase = "2B-ready";
+            state = _coordinator.Transition(
+                state,
+                RetirementStatus.Phase2BReady,
+                "Pre-execution review passed. Survivor inventory captured before any delete.");
+        }
 
         var identification = IdentifyTarget(state);
         if (!identification.Passed || identification.ObservedBoot1 is null)
@@ -103,6 +127,25 @@ public sealed class ProductionRetirementExecution
             _coordinator.MarkFailed(state, message);
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
         }
+
+        if (request.DryRun)
+        {
+            return new RecoveryRunResult(
+                RecoveryRunOutcome.DryRunCompleted,
+                review.Describe() + Environment.NewLine +
+                "Dry run: destructive intent was not persisted and no disk command was started.");
+        }
+
+        state.DestructiveIntentGptSnapshot = DestructiveIntentReconciliation.Capture(_layout.Capture());
+        state.DestructiveIntentAtUtc = DateTimeOffset.UtcNow;
+        state.Phase = "2B-destructive-intent";
+        state = _coordinator.Transition(
+            state,
+            RetirementStatus.DestructiveIntent,
+            "Durable destructive intent and exact pre-command GPT snapshot persisted.");
+
+        var preCommandBcd = await _bcdStore.CaptureAsync();
+        Boot2DefaultInvariant.Require(state, preCommandBcd, "immediately before Boot 1 partition deletion");
 
         var result = await _executor.RetireBoot1Async(
             state.Boot1Identity!,
@@ -118,6 +161,79 @@ public sealed class ProductionRetirementExecution
             deletionOccurred: result.DestructiveDeletionOccurred);
 
         return await ContinuePhase2CAsync(state, request, beforeBcd);
+    }
+
+    private async Task<RecoveryRunResult> ResumeDestructiveIntentAsync(
+        RetirementState state,
+        RecoveryRunRequest request)
+    {
+        if (state.Boot1Identity is null || state.Boot2Identity is null ||
+            !state.Boot1Identity.TryGetGptId(out var boot1Gpt) ||
+            !state.Boot2Identity.TryGetGptId(out var boot2Gpt))
+            return InterlockRecoveryRequired(state, "Destructive-intent resume lacks valid Boot 1 or Boot 2 GPT identity.");
+
+        var live = _layout.Capture();
+        var boot1Matches = live.WithGptId(boot1Gpt);
+        var boot2Matches = live.WithGptId(boot2Gpt);
+        if (boot1Matches.Count > 1 || boot2Matches.Count != 1)
+            return InterlockRecoveryRequired(
+                state,
+                $"Destructive-intent resume is ambiguous: Boot1Matches={boot1Matches.Count}, Boot2Matches={boot2Matches.Count}.");
+
+        if (boot1Matches.Count == 0)
+        {
+            var reconciliation = DestructiveIntentReconciliation.VerifyTargetAbsent(state, live);
+            if (!reconciliation.Passed)
+                return InterlockRecoveryRequired(state, reconciliation.Describe());
+
+            var bcd = await _bcdStore.CaptureAsync();
+            var defaultReport = Boot2DefaultInvariant.Verify(state, bcd, "post-destructive resume");
+            if (!defaultReport.Passed)
+                return InterlockRecoveryRequired(state, defaultReport.Describe());
+
+            state.Phase = "2B-resumed-after-delete";
+            state = _coordinator.RecordBoot1Retired(
+                state,
+                "Boot 1 was absent and every non-target GPT survivor reconciled against the durable destructive-intent snapshot.",
+                deletionOccurred: true);
+            return await ContinuePhase2CAsync(state, request, beforeBcd: null);
+        }
+
+        var review = _hardwareReview.Run(state);
+        if (!review.OverallPassed)
+            return InterlockRecoveryRequired(state, review.Describe());
+
+        var identification = IdentifyTarget(state);
+        if (!identification.Passed || identification.ObservedBoot1 is null)
+            return InterlockRecoveryRequired(state, identification.Describe());
+
+        if (request.DryRun)
+            return new RecoveryRunResult(
+                RecoveryRunOutcome.DryRunCompleted,
+                "Boot 1 remains exactly present at the durable destructive-intent boundary; dry run did not retry deletion.");
+
+        RetirementExecutionAuthorization.RequireCommitted(
+            state, _options, request.OperationToken, await _runtimeProof.CaptureAsync());
+        var preCommandBcd = await _bcdStore.CaptureAsync();
+        Boot2DefaultInvariant.Require(state, preCommandBcd, "destructive-intent retry immediately before partition deletion");
+        var result = await _executor.RetireBoot1Async(
+            state.Boot1Identity,
+            identification.ObservedBoot1,
+            state.Boot2Identity,
+            identification.Report,
+            explicitOptIn: true);
+        state.Phase = "2B-deleted-and-verified";
+        state = _coordinator.RecordBoot1Retired(state, result.Message, result.DestructiveDeletionOccurred);
+        return await ContinuePhase2CAsync(state, request, beforeBcd: null);
+    }
+
+    private RecoveryRunResult InterlockRecoveryRequired(RetirementState state, string reason)
+    {
+        var message = "RECOVERY_REQUIRED: " + reason;
+        state.LastError = message;
+        _coordinator.Transition(state, RetirementStatus.RecoveryRequired, message);
+        _log.Warn("execution", message);
+        return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
     }
 
     private async Task<RecoveryRunResult> ResumeAfterBoot1RetiredAsync(
@@ -175,6 +291,9 @@ public sealed class ProductionRetirementExecution
             beforeBcd);
         _log.Info("execution", survivorReport.Describe());
 
+        var boot2Boundary = Boot2DefaultInvariant.Verify(state, afterBcd, "before Boot 1 BCD deletion");
+        if (!boot2Boundary.Passed) return InterlockRecoveryRequired(state, boot2Boundary.Describe());
+
         if (!survivorReport.Passed)
         {
             var message =
@@ -213,7 +332,11 @@ public sealed class ProductionRetirementExecution
             }
 
             state.BcdDeletionPerformed = false;
-            state = _coordinator.Persist(state);
+            if (state.Status == RetirementStatus.Boot1Retired)
+                state = _coordinator.Transition(state, RetirementStatus.BcdUpdated,
+                    "Boot 1 BCD object was absent and exact Boot 2 loader/default verification passed.");
+            else
+                state = _coordinator.Persist(state);
             return await HandoffAsync(state, request, finalAlreadyAbsent.Describe());
         }
 
@@ -239,12 +362,9 @@ public sealed class ProductionRetirementExecution
 
         try
         {
-            var bcdResult = await _executor.DeleteBoot1BcdEntryAsync(state, resolved.Report, explicitOptIn: true);
+            await _executor.DeleteBoot1BcdEntryAsync(state, resolved.Report, explicitOptIn: true);
             state.BcdDeletionPerformed = true;
-            state = _coordinator.Transition(
-                state,
-                RetirementStatus.BcdUpdated,
-                bcdResult.Message);
+            state = _coordinator.Persist(state);
         }
         catch (Exception exception) when (exception is RetirementExecutionException or RetirementNotImplementedException)
         {
@@ -278,6 +398,13 @@ public sealed class ProductionRetirementExecution
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
         }
 
+        var finalBoot2 = Boot2DefaultInvariant.Verify(state, finalBcd, "after Boot 1 BCD deletion");
+        if (!finalBoot2.Passed) return InterlockRecoveryRequired(state, finalBoot2.Describe());
+
+        if (state.Status == RetirementStatus.Boot1Retired)
+            state = _coordinator.Transition(state, RetirementStatus.BcdUpdated,
+                "Boot 1 BCD cleanup and exact Boot 2 loader/default verification completed.");
+
         return await HandoffAsync(state, request, finalReport.Describe());
     }
 
@@ -293,14 +420,12 @@ public sealed class ProductionRetirementExecution
                 priorDetail + Environment.NewLine + "Dry run: no boot change or restart was made.");
         }
 
-        await _bootManager.SetNextBootAsync(state.Boot2Id);
-
         if (state.Status == RetirementStatus.Boot1Retired)
         {
             state = _coordinator.Transition(
                 state,
                 RetirementStatus.BcdUpdated,
-                $"One-time boot sequence set to Boot 2 ({state.Boot2Id}).");
+                "Boot 1 BCD cleanup and Boot 2 verification completed.");
         }
 
         var verification = await _bootManager.TryGetEntryAsync(state.Boot2Id);
@@ -312,10 +437,31 @@ public sealed class ProductionRetirementExecution
             return new RecoveryRunResult(RecoveryRunOutcome.Failed, message);
         }
 
-        state = _coordinator.Transition(
-            state,
-            RetirementStatus.Verified,
-            $"Boot 2 entry re-read after the BCD update: {verification.Describe()}.");
+        BcdSnapshot preRestartBcd;
+        try
+        {
+            preRestartBcd = await _bcdStore.CaptureAsync();
+        }
+        catch (Exception exception)
+        {
+            return InterlockRecoveryRequired(state, "BCD enumeration failed immediately before reboot: " + exception.Message);
+        }
+
+        var preRestartDefault = Boot2DefaultInvariant.Verify(state, preRestartBcd, "immediately before reboot");
+        if (!preRestartDefault.Passed)
+            return InterlockRecoveryRequired(state, preRestartDefault.Describe());
+
+        if (state.Status != RetirementStatus.Verified)
+            state = _coordinator.Transition(
+                state,
+                RetirementStatus.Verified,
+                $"Boot 2 entry re-read after the BCD update: {verification.Describe()}.");
+
+        await _bootManager.SetNextBootAsync(state.Boot2Id);
+
+        var armedBcd = await _bcdStore.CaptureAsync();
+        var armedDefault = Boot2DefaultInvariant.Verify(state, armedBcd, "after one-shot Boot 2 arm");
+        if (!armedDefault.Passed) return InterlockRecoveryRequired(state, armedDefault.Describe());
 
         await _bootManager.RestartAsync(_options.RestartDelaySeconds);
 

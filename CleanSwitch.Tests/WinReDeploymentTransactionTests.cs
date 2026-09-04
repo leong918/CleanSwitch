@@ -123,6 +123,72 @@ public sealed class WinReDeploymentTransactionTests
     }
 
     [Fact]
+    public async Task Missing_expected_original_hash_refuses_before_journal_or_platform_mutation()
+    {
+        using var fixture = DeploymentFixture.Create();
+        var invalid = fixture.Plan with { ExpectedOriginalWimSha256 = string.Empty };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().DeployAsync(invalid));
+
+        Assert.False(File.Exists(fixture.Journal.Path));
+        Assert.False(fixture.Platform.RollbackCalled);
+    }
+
+    [Fact]
+    public void Authoritative_shared_journal_is_visible_across_different_host_roots()
+    {
+        using var fixture = DeploymentFixture.Create();
+        fixture.Journal.Create(fixture.Plan);
+        var hostOneProgramData = Path.Combine(fixture.Root, "host-one-c", "ProgramData", "CleanSwitch", "deployments");
+        var hostTwoProgramData = Path.Combine(fixture.Root, "host-two-c", "ProgramData", "CleanSwitch", "deployments");
+
+        Assert.Single(WinReDeploymentJournalDiscovery.InspectAuthoritativeRoots(
+            fixture.JournalRoot, hostOneProgramData).Active);
+        Assert.Single(WinReDeploymentJournalDiscovery.InspectAuthoritativeRoots(
+            fixture.JournalRoot, hostTwoProgramData).Active);
+    }
+
+    [Fact]
+    public void Unresolved_legacy_programdata_journal_fails_closed_instead_of_migrating()
+    {
+        using var fixture = DeploymentFixture.Create();
+        var legacyRoot = Path.Combine(fixture.Root, "legacy-programdata");
+        var legacy = new FileWinReDeploymentJournal(
+            Path.Combine(legacyRoot, "legacy", "deployment-journal.ndjson"));
+        legacy.Create(fixture.Plan);
+
+        var inventory = WinReDeploymentJournalDiscovery.InspectAuthoritativeRoots(
+            fixture.JournalRoot, legacyRoot);
+
+        Assert.Empty(inventory.Active);
+        Assert.Contains(inventory.Invalid, item => item.Contains("cannot be migrated automatically", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Changed_live_hash_fails_D0_before_any_mutating_platform_stage()
+    {
+        using var fixture = DeploymentFixture.Create();
+        File.WriteAllText(fixture.Live, "drifted-live-winre");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().DeployAsync(fixture.Plan));
+
+        Assert.False(fixture.Platform.RollbackCalled);
+        Assert.Equal(WinReDeploymentStage.D0Prepared, fixture.Journal.Load().Last.Stage);
+    }
+
+    [Fact]
+    public async Task Final_first_mutation_mismatch_never_calls_reagentc_disable_boundary()
+    {
+        using var fixture = DeploymentFixture.Create();
+        fixture.Platform.FirstMutationPasses = false;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Transaction().DeployAsync(fixture.Plan));
+
+        Assert.Equal(0, fixture.Platform.DisableCallCount);
+        Assert.Equal(WinReDeploymentStage.D2BackupVerified, fixture.Journal.Load().Last.Stage);
+    }
+
+    [Fact]
     public async Task Pre_mutation_incomplete_journal_closes_without_running_live_rollback()
     {
         using var fixture = DeploymentFixture.Create();
@@ -303,6 +369,8 @@ public sealed class WinReDeploymentTransactionTests
                 PreparedBundlePath = PreparedBundle,
                 PreparedBundleSha256 = Hash(PreparedBundle),
                 LiveWimPath = Live,
+                ExpectedOriginalWimSha256 = OriginalHash,
+                ObservedOriginalWimSha256 = OriginalHash,
                 OriginalWimSha256 = OriginalHash,
                 BackupWimPath = Backup,
                 IncomingWimPath = Incoming,
@@ -371,8 +439,11 @@ public sealed class WinReDeploymentTransactionTests
         public string RecoveryGuid { get; set; } = fixture.Plan.ExpectedRecoveryGuid;
         public bool RollbackCalled { get; private set; }
         public bool PostSmokePasses { get; set; } = true;
+        public bool FirstMutationPasses { get; set; } = true;
+        public int DisableCallCount { get; private set; }
 
-        public Task<WinReDeploymentVerification> VerifyD0Async(WinReDeploymentPlan plan) => Ok();
+        public Task<WinReDeploymentVerification> VerifyD0Async(WinReDeploymentPlan plan) =>
+            Result(Hash(plan.LiveWimPath) == plan.ExpectedOriginalWimSha256);
         public Task<WinReDeploymentVerification> CaptureSnapshotsAsync(WinReDeploymentPlan plan) => Ok();
         public Task<WinReDeploymentVerification> BackupOriginalAsync(WinReDeploymentPlan plan)
         {
@@ -380,7 +451,8 @@ public sealed class WinReDeploymentTransactionTests
             File.Copy(plan.LiveWimPath, plan.BackupWimPath);
             return Ok();
         }
-        public Task DisableAsync(WinReDeploymentPlan plan) { Enabled = false; return Task.CompletedTask; }
+        public Task<WinReDeploymentVerification> VerifyFirstMutationAsync(WinReDeploymentPlan plan) => Result(FirstMutationPasses);
+        public Task DisableAsync(WinReDeploymentPlan plan) { DisableCallCount++; Enabled = false; return Task.CompletedTask; }
         public Task<WinReDeploymentVerification> VerifyDisabledAsync(WinReDeploymentPlan plan) => Result(!Enabled);
         public Task RemoveOriginalAsync(WinReDeploymentPlan plan) { File.Delete(plan.LiveWimPath); return Task.CompletedTask; }
         public Task<WinReDeploymentVerification> VerifyOriginalRemovedAsync(WinReDeploymentPlan plan) => Result(!File.Exists(plan.LiveWimPath));
@@ -417,7 +489,7 @@ public sealed class WinReDeploymentTransactionTests
             return Task.CompletedTask;
         }
         public Task<WinReDeploymentVerification> VerifyRollbackAsync(WinReDeploymentPlan plan) =>
-            Result(Hash(plan.LiveWimPath) == plan.OriginalWimSha256 && Enabled && ProtectedBcdUnchanged);
+            Result(Hash(plan.LiveWimPath) == plan.ExpectedOriginalWimSha256 && Enabled && ProtectedBcdUnchanged);
 
         public void SetFilesystemState(RecoveryFilesystemState state)
         {

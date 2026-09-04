@@ -23,6 +23,10 @@ internal sealed class FakeBootManager : IBootManager
 
     public Func<string, Task<bool>>? OnSetNextBootAsync { get; set; }
 
+    public int ClearNextBootCallCount { get; private set; }
+
+    public Func<Task<bool>>? OnClearNextBootAsync { get; set; }
+
     public Func<int, Task>? OnRestartAsync { get; set; }
 
     public BootLayout? DetectedLayout { get; set; }
@@ -44,6 +48,13 @@ internal sealed class FakeBootManager : IBootManager
         SetDefaultBootCallCount++;
         DefaultBootTarget = bootGuid;
         return OnSetDefaultBootAsync?.Invoke(bootGuid) ?? Task.FromResult(true);
+    }
+
+    public Task<bool> ClearNextBootAsync()
+    {
+        ClearNextBootCallCount++;
+        NextBootTarget = null;
+        return OnClearNextBootAsync?.Invoke() ?? Task.FromResult(true);
     }
 
     public Task RestartAsync(int delaySeconds)

@@ -21,13 +21,16 @@ public sealed class Phase2AHandoffBehaviorTests
         var state = await context.Handoff.ExecuteAsync(context.Layout);
 
         Assert.Equal(RetirementStatus.Pending, state.Status);
-        Assert.Equal(2, state.SchemaVersion);
+        Assert.Equal(4, state.SchemaVersion);
         Assert.Equal(Boot1, state.Boot1BcdObjectId);
         Assert.Equal(Boot2, state.Boot2BcdObjectId);
         Assert.Equal(1, context.Coordinator.BeginRetirementCallCount);
         Assert.Equal(Boot2, context.BootManager.DefaultBootTarget);
         Assert.Equal(Recovery, context.BootManager.NextBootTarget);
         Assert.True(context.BootManager.RestartCalled);
+        Assert.Equal(HandoffAuthorizationStates.Committed, state.HandoffAuthorizationState);
+        Assert.True(Guid.TryParse(state.HandoffAuthorizationToken, out _));
+        Assert.Equal(Recovery, state.HandoffRecoveryBcdObjectId);
         Assert.Equal(new[] { "launcher", "capture-boot1", "capture-boot2", "default", "bootsequence", "restart" }, context.Events);
     }
 
@@ -170,6 +173,34 @@ public sealed class Phase2AHandoffBehaviorTests
         Assert.Equal(1, context.BootManager.SetDefaultBootCallCount);
         Assert.Equal(1, context.BootManager.SetNextBootCallCount);
         Assert.True(context.BootManager.RestartCalled);
+    }
+
+    [Fact]
+    public async Task Shutdown_failure_after_arm_disarms_and_records_ordinary_failure()
+    {
+        var context = CreateContext(Layout(Boot1, Boot2));
+        context.BootManager.OnRestartAsync = _ => throw new BootManagerException("shutdown failed");
+
+        await Assert.ThrowsAsync<BootManagerException>(() => context.Handoff.ExecuteAsync(context.Layout));
+
+        Assert.Equal(1, context.BootManager.ClearNextBootCallCount);
+        Assert.Equal(HandoffAuthorizationStates.Disarmed, context.Coordinator.State!.HandoffAuthorizationState);
+        Assert.Equal(RetirementStatus.Failed, context.Coordinator.State.Status);
+    }
+
+    [Fact]
+    public async Task Unprovable_disarm_after_shutdown_failure_interlocks_recovery_required()
+    {
+        var context = CreateContext(Layout(Boot1, Boot2));
+        context.BootManager.OnRestartAsync = _ => throw new BootManagerException("shutdown failed");
+        context.BootManager.OnClearNextBootAsync = () => Task.FromResult(false);
+
+        var exception = await Assert.ThrowsAsync<BootManagerException>(() => context.Handoff.ExecuteAsync(context.Layout));
+
+        Assert.Contains("disarm could not be proven", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(RetirementStatus.RecoveryRequired, context.Coordinator.State!.Status);
+        Assert.Equal(HandoffAuthorizationStates.RecoveryRequired, context.Coordinator.State.HandoffAuthorizationState);
+        Assert.Equal(0, context.Coordinator.MarkFailedCallCount);
     }
 
     [Fact]

@@ -15,8 +15,8 @@ public static class RetirementStateMachine
     [
         RetirementStatus.Pending,
         RetirementStatus.RecoveryStarted,
-        RetirementStatus.TargetValidated,
-        RetirementStatus.Boot2Validated,
+        RetirementStatus.Phase2BReady,
+        RetirementStatus.DestructiveIntent,
         RetirementStatus.Boot1Retired,
         RetirementStatus.BcdUpdated,
         RetirementStatus.Verified,
@@ -30,8 +30,10 @@ public static class RetirementStateMachine
     [
         (RetirementStatus.RecoveryStarted, RetirementStatus.Phase2BReady,
             "Production execution captures survivors after pre-delete review."),
-        (RetirementStatus.Phase2BReady, RetirementStatus.Boot1Retired,
-            "Phase 2B partition delete completed and verified.")
+        (RetirementStatus.Phase2BReady, RetirementStatus.DestructiveIntent,
+            "Durable destructive intent was recorded before the disk command."),
+        (RetirementStatus.DestructiveIntent, RetirementStatus.Boot1Retired,
+            "Post-command GPT reconciliation proved only Boot 1 was removed.")
     ];
 
     /// <summary>
@@ -40,6 +42,10 @@ public static class RetirementStateMachine
     /// </summary>
     private static readonly (RetirementStatus From, RetirementStatus To, string Why)[] Phase2ASkipEdges =
     [
+        (RetirementStatus.RecoveryStarted, RetirementStatus.TargetValidated,
+            "Read-only identification recorded the exact Boot 1 target."),
+        (RetirementStatus.TargetValidated, RetirementStatus.Boot2Validated,
+            "Read-only validation proved the Boot 2 entry before a non-destructive handoff."),
         (RetirementStatus.Boot2Validated, RetirementStatus.BcdUpdated,
             "BOOT1_RETIRED is skipped because live deletion is disabled in this build.")
     ];
@@ -92,21 +98,25 @@ public static class RetirementStateMachine
             table[edge.From].Add(edge.To);
         }
 
-        // Any non-terminal state may fail or be aborted. FAILED may be re-entered so that a
-        // later error can overwrite an earlier one, and may be aborted by an operator.
-        foreach (var status in Enum.GetValues<RetirementStatus>())
+        foreach (var status in new[]
+                 {
+                     RetirementStatus.Pending,
+                     RetirementStatus.RecoveryStarted,
+                     RetirementStatus.TargetValidated,
+                     RetirementStatus.Boot2Validated,
+                     RetirementStatus.Phase2BReady,
+                     RetirementStatus.Failed
+                 })
         {
-            if (status is RetirementStatus.Complete or RetirementStatus.Aborted)
-            {
-                continue;
-            }
-
             table[status].Add(RetirementStatus.Failed);
             table[status].Add(RetirementStatus.Aborted);
+            table[status].Add(RetirementStatus.RecoveryRequired);
         }
 
-        // A failed run may be retried from the beginning of the recovery-side work.
-        table[RetirementStatus.Failed].Add(RetirementStatus.RecoveryStarted);
+        table[RetirementStatus.DestructiveIntent].Add(RetirementStatus.RecoveryRequired);
+        table[RetirementStatus.Boot1Retired].Add(RetirementStatus.RecoveryRequired);
+        table[RetirementStatus.BcdUpdated].Add(RetirementStatus.RecoveryRequired);
+        table[RetirementStatus.Verified].Add(RetirementStatus.RecoveryRequired);
 
         return table;
     }

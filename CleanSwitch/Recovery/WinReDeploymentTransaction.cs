@@ -37,6 +37,7 @@ public interface IWinReDeploymentPlatform
     Task<WinReDeploymentVerification> VerifyD0Async(WinReDeploymentPlan plan);
     Task<WinReDeploymentVerification> CaptureSnapshotsAsync(WinReDeploymentPlan plan);
     Task<WinReDeploymentVerification> BackupOriginalAsync(WinReDeploymentPlan plan);
+    Task<WinReDeploymentVerification> VerifyFirstMutationAsync(WinReDeploymentPlan plan);
     Task DisableAsync(WinReDeploymentPlan plan);
     Task<WinReDeploymentVerification> VerifyDisabledAsync(WinReDeploymentPlan plan);
     Task RemoveOriginalAsync(WinReDeploymentPlan plan);
@@ -85,9 +86,11 @@ public sealed class WinReDeploymentTransaction
     public async Task<WinReDeploymentResult> DeployAsync(WinReDeploymentPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        WinReDeploymentHashPolicy.RequireSealedPlan(plan);
         using var transactionLock = AcquireExclusiveLock();
         var existing = WinReDeploymentJournalDiscovery.Inspect(
-            Directory.GetParent(Path.GetDirectoryName(_journal.Path)!)?.FullName);
+            Directory.GetParent(Path.GetDirectoryName(_journal.Path)!)?.FullName
+            ?? throw new InvalidOperationException("Deployment journal root could not be resolved."));
         if (existing.Invalid.Count > 0 || existing.Active.Count > 0 || File.Exists(_journal.Path))
         {
             throw new InvalidOperationException(
@@ -103,6 +106,10 @@ public sealed class WinReDeploymentTransaction
 
         await RequireAsync(await _platform.BackupOriginalAsync(plan), "D2 original WIM backup");
         Complete(WinReDeploymentStage.D2BackupVerified, "Original live WIM backup size/hash/readability verified.");
+
+        await RequireAsync(await _platform.VerifyFirstMutationAsync(plan), "final first-mutation authorization");
+        Complete(WinReDeploymentStage.FirstMutationAuthorized,
+            "Registered WinRE identity, live WIM and exact backup were reverified immediately before mutation.");
 
         Intent(WinReDeploymentStage.D3DisableIntent, "About to run REAgentC disable.");
         await _platform.DisableAsync(plan);

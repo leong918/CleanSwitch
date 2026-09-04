@@ -33,7 +33,7 @@ public sealed class WinReLauncherDispatchTests
     [Fact]
     public void Verified_launcher_invokes_recovery_runner_with_explicit_runtime_opt_in()
     {
-        Assert.Equal(["--recovery-run", "--execute-deletion"], WinReLauncherContract.RecoveryArguments);
+        Assert.Equal(["--recovery-launch"], WinReLauncherContract.RecoveryArguments);
         var program = File.ReadAllText(FindRepoFile("CleanSwitch", "Program.cs"));
         Assert.Contains("return RunRecoverySide(new RecoveryRunRequest(", program, StringComparison.Ordinal);
         Assert.Contains("ExecuteDeletion: executeDeletion && !reviewOnly", program, StringComparison.Ordinal);
@@ -44,7 +44,7 @@ public sealed class WinReLauncherDispatchTests
     {
         var source = File.ReadAllText(FindRepoFile("CleanSwitch", "Program.cs"));
         var smoke = source.IndexOf("if (recoverySmoke)", StringComparison.Ordinal);
-        var incomplete = source.IndexOf("WinReDeploymentJournalDiscovery.Inspect()", StringComparison.Ordinal);
+        var incomplete = source.IndexOf("WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load())", StringComparison.Ordinal);
         var deploy = source.IndexOf("if (deployWinReLauncher)", StringComparison.Ordinal);
         var gui = source.IndexOf("ApplicationConfiguration.Initialize();", StringComparison.Ordinal);
 

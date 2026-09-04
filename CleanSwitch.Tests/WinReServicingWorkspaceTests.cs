@@ -86,7 +86,7 @@ public sealed class WinReServicingWorkspaceTests
         using var fixture = PipelineFixture.Create(includeFallback: true);
         var sourceBefore = Hash(fixture.SourceWim);
 
-        var result = await fixture.Provisioner.ProvisionAsync(fixture.Recovery);
+        var result = await fixture.Provisioner.ProvisionAsync(fixture.Recovery, sourceBefore);
 
         Assert.True(result.Passed, result.Report.Describe());
         Assert.NotNull(result.PreparedImagePath);
@@ -118,7 +118,7 @@ public sealed class WinReServicingWorkspaceTests
         using var fixture = PipelineFixture.Create(includeFallback: true, copier: new CorruptingCopier());
         var sourceBefore = Hash(fixture.SourceWim);
 
-        var result = await fixture.Provisioner.ProvisionAsync(fixture.Recovery);
+        var result = await fixture.Provisioner.ProvisionAsync(fixture.Recovery, sourceBefore);
 
         Assert.False(result.Passed);
         Assert.Contains(result.Report.Checks, check => check.Name == "source-copy-hash" && !check.Passed);
@@ -134,7 +134,7 @@ public sealed class WinReServicingWorkspaceTests
         var sourceBefore = Hash(fixture.SourceWim);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            fixture.Provisioner.ProvisionAsync(fixture.Recovery));
+            fixture.Provisioner.ProvisionAsync(fixture.Recovery, sourceBefore));
 
         Assert.Contains("approved fallback", exception.Message, StringComparison.Ordinal);
         Assert.Equal(sourceBefore, Hash(fixture.SourceWim));
@@ -225,7 +225,7 @@ public sealed class WinReServicingWorkspaceTests
                 new LoggedWinReDismRunner(),
                 new WinReFileCopier());
 
-            var result = await provisioner.ProvisionAsync(recovery);
+            var result = await provisioner.ProvisionAsync(recovery, sourceBefore);
 
             Assert.True(result.Passed, result.Report.Describe());
             Assert.Equal(sourceBefore, Hash(sourceWim));

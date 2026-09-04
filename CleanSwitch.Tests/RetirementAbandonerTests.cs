@@ -218,7 +218,7 @@ public sealed class RetirementAbandonerTests
             RetirementFixtures.Boot2Identity());
 
         Assert.Equal(RetirementStatus.Pending, fresh.Status);
-        Assert.Equal(2, fresh.SchemaVersion);
+        Assert.Equal(RetirementState.CurrentSchemaVersion, fresh.SchemaVersion);
         Assert.True(File.Exists(result.ArchivePath));
         Assert.Contains("\"schemaVersion\": 1", File.ReadAllText(result.ArchivePath), StringComparison.Ordinal);
     }

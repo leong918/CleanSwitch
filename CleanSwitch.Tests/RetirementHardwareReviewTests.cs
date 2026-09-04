@@ -80,7 +80,7 @@ public sealed class RetirementHardwareReviewTests
 
         Assert.True(result.Phase2BReviewPassed, result.Describe());
         Assert.False(result.Phase2CReviewPassed, result.Describe());
-        Assert.Contains("target-is-not-default", result.Describe(), StringComparison.Ordinal);
+        Assert.Contains("default-is-exact-boot2", result.Describe(), StringComparison.Ordinal);
     }
 
     [Fact]

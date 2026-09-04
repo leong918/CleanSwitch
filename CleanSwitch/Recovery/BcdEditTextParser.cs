@@ -111,6 +111,10 @@ public static class BcdEditTextParser
         {
             entry.Type = type;
         }
+        else if (TryGetProperty(line, "systemroot", out var systemRoot))
+        {
+            entry.SystemRoot = systemRoot;
+        }
     }
 
     private static BcdEntry ToBcdEntry(ParsedEntry entry) =>
@@ -122,7 +126,8 @@ public static class BcdEditTextParser
             entry.OsDevice.Trim(),
             entry.RecoverySequence.Trim(),
             entry.ResumeObject.Trim(),
-            entry.Type.Trim());
+            entry.Type.Trim(),
+            entry.SystemRoot.Trim());
 
     private sealed class ParsedEntry
     {
@@ -141,5 +146,7 @@ public static class BcdEditTextParser
         public string ResumeObject { get; set; } = string.Empty;
 
         public string Type { get; set; } = string.Empty;
+
+        public string SystemRoot { get; set; } = string.Empty;
     }
 }

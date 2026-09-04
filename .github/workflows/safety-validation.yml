@@ -1,0 +1,206 @@
+name: Safety validation
+
+on:
+  push:
+    branches:
+      - main
+      - 'safety/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safety-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safe-profile:
+    name: Safe profile
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore CleanSwitch.sln
+
+      - name: Build safe profile
+        run: dotnet build CleanSwitch.sln --configuration Release --no-restore -p:CleanSwitchLiveTestBuild=false
+
+      - name: Test safe profile
+        run: >-
+          dotnet test CleanSwitch.sln --configuration Release --no-build
+          -p:CleanSwitchLiveTestBuild=false
+          --logger "trx;LogFileName=safe-profile.trx"
+          --results-directory TestResults/safe-profile
+
+      - name: Upload safe-profile evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safe-profile-test-results
+          path: TestResults/safe-profile
+          if-no-files-found: warn
+          retention-days: 14
+
+  live-contracts:
+    name: Live-build contracts without host opt-ins
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore CleanSwitch.sln -p:CleanSwitchLiveTestBuild=true
+
+      - name: Test live-build contracts
+        run: >-
+          dotnet test CleanSwitch.sln --configuration Release --no-restore
+          -p:CleanSwitchLiveTestBuild=true
+          --logger "trx;LogFileName=live-contracts.trx"
+          --results-directory TestResults/live-contracts
+
+      - name: Upload live-contract evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-contract-test-results
+          path: TestResults/live-contracts
+          if-no-files-found: warn
+          retention-days: 14
+
+  isolated-windows-integration:
+    name: Disposable VHD, isolated BCD, and disposable WIM
+    runs-on: windows-latest
+    env:
+      CLEANSWITCH_VHD_TESTS: '1'
+      CLEANSWITCH_BCD_TESTS: '1'
+      CLEAN_SWITCH_RUN_WINRE_WIM_INTEGRATION: '1'
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Verify elevated runner context
+        run: |
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'Disposable Windows integration tests require an elevated ephemeral runner.'
+          }
+
+      - name: Restore
+        run: dotnet restore CleanSwitch.sln -p:CleanSwitchLiveTestBuild=true
+
+      - name: Run isolated Windows integration tests
+        run: >-
+          dotnet test CleanSwitch.sln --configuration Release --no-restore
+          -p:CleanSwitchLiveTestBuild=true
+          --filter "Category=VhdIntegration|Category=BcdIntegration|Category=CombinedRetirementIntegration"
+          --logger "trx;LogFileName=isolated-windows-integration.trx"
+          --results-directory TestResults/isolated-windows-integration
+
+      - name: Run disposable WinRE WIM servicing tests
+        run: >-
+          dotnet test CleanSwitch.sln --configuration Release --no-restore
+          -p:CleanSwitchLiveTestBuild=true
+          --filter "FullyQualifiedName~WinReServicingWorkspaceTests"
+          --logger "trx;LogFileName=winre-wim-integration.trx"
+          --results-directory TestResults/winre-wim-integration
+
+      - name: Upload isolated-integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-windows-integration-test-results
+          path: TestResults
+          if-no-files-found: warn
+          retention-days: 14
+
+  pre-physical-gate-classification:
+    name: Mandatory pre-physical gate classification
+    needs:
+      - safe-profile
+      - live-contracts
+      - isolated-windows-integration
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Attempt complete mandatory pre-physical gate
+        id: prephysical
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Path TestResults/pre-physical-gate -Force | Out-Null
+          & ./scripts/Test-PrePhysicalDeployment.ps1 *>&1 |
+            Tee-Object -FilePath TestResults/pre-physical-gate/output.log
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pre-physical gate exited with code $LASTEXITCODE."
+          }
+
+      - name: Record mandatory gate classification
+        if: always()
+        env:
+          GATE_OUTCOME: ${{ steps.prephysical.outcome }}
+        run: |
+          if ($env:GATE_OUTCOME -eq 'success') {
+            "PRE-PHYSICAL VALIDATION = PASS" | Tee-Object -FilePath TestResults/pre-physical-gate/classification.txt
+            "### PRE-PHYSICAL VALIDATION = PASS" >> $env:GITHUB_STEP_SUMMARY
+          }
+          else {
+            @(
+              'PRE-PHYSICAL VALIDATION = NO-GO'
+              'Reason: the complete mandatory disposable-VM/WinRE harness is not available on this hosted runner.'
+              'This classification is not a physical-host deployment authorization.'
+            ) | Tee-Object -FilePath TestResults/pre-physical-gate/classification.txt
+            "### PRE-PHYSICAL VALIDATION = NO-GO" >> $env:GITHUB_STEP_SUMMARY
+            "The complete mandatory disposable-VM/WinRE harness is unavailable on this hosted runner; no skipped gate was converted into PASS." >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload pre-physical gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-physical-gate-classification
+          path: TestResults/pre-physical-gate
+          if-no-files-found: error
+          retention-days: 14
