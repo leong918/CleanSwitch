@@ -122,20 +122,155 @@ jobs:
         run: dotnet restore CleanSwitch.sln -p:CleanSwitchLiveTestBuild=true
 
       - name: Run isolated Windows integration tests
-        run: >-
-          dotnet test CleanSwitch.sln --configuration Release --no-restore
-          -p:CleanSwitchLiveTestBuild=true
-          --filter "Category=VhdIntegration|Category=BcdIntegration|Category=CombinedRetirementIntegration"
-          --logger "trx;LogFileName=isolated-windows-integration.trx"
-          --results-directory TestResults/isolated-windows-integration
+        id: run_isolated_windows_integration
+        run: |
+          dotnet test CleanSwitch.sln --configuration Release --no-restore `
+            -p:CleanSwitchLiveTestBuild=true `
+            --filter "Category=VhdIntegration|Category=BcdIntegration|Category=CombinedRetirementIntegration" `
+            --logger "trx;LogFileName=isolated-windows-integration.trx" `
+            --results-directory TestResults/isolated-windows-integration
+          $testExitCode = $LASTEXITCODE
+          if ($null -eq $testExitCode) { $testExitCode = 1 }
+          "test_exit_code=$testExitCode" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "isolated windows integration test exit code: $testExitCode"
+          exit 0
+
+      - name: Emit isolated integration failure evidence
+        if: always()
+        env:
+          ISOLATED_TRX: TestResults/isolated-windows-integration/isolated-windows-integration.trx
+          ISOLATED_EXIT_CODE: ${{ steps.run_isolated_windows_integration.outputs.test_exit_code }}
+        run: |
+          $trxPath = $env:ISOLATED_TRX
+          if (-not (Test-Path $trxPath)) {
+            Write-Host "TRX file not found at: $trxPath"
+            Write-Host "Skipping TRX failure evidence extraction."
+          }
+          else {
+            try {
+              [xml]$trx = Get-Content $trxPath
+              $counters = $trx.TestRun.ResultSummary.Counters
+              $passed = [int]$counters.Passed
+              $failed = [int]$counters.Failed
+              $skipped = [int]$counters.Skipped
+              $total = [int]$counters.Total
+
+              "Passed: $passed" | Write-Host
+              "Failed: $failed" | Write-Host
+              "Skipped: $skipped" | Write-Host
+              "Total: $total" | Write-Host
+
+              "## Isolated Windows Integration" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "Passed: $passed" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "Failed: $failed" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "Skipped: $skipped" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "Total: $total" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+              if ($failed -gt 0) {
+                $failedResults = @($trx.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' })
+                if ($failedResults.Count -eq 0) {
+                  $failedResults = @($trx.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'NotExecuted' })
+                }
+
+                foreach ($result in $failedResults) {
+                  $name = [string]$result.testName
+                  $fqn = [string]$result.fullyQualifiedName
+                  $duration = [string]$result.duration
+                  $outcome = [string]$result.outcome
+                  $msg = 'No error message recorded.'
+                  $stack = 'No stack trace recorded.'
+                  $stdout = 'No StdOut recorded.'
+                  $stderr = 'No StdErr recorded.'
+
+                  if ($null -ne $result.Output) {
+                    if ($null -ne $result.Output.ErrorInfo) {
+                      if ($null -ne $result.Output.ErrorInfo.Message) { $msg = [string]$result.Output.ErrorInfo.Message }
+                      if ($null -ne $result.Output.ErrorInfo.StackTrace) { $stack = [string]$result.Output.ErrorInfo.StackTrace }
+                    }
+                    if ($null -ne $result.Output.StdOut) { $stdout = [string]$result.Output.StdOut }
+                    elseif ($null -ne $result.Output.StandardOutput) { $stdout = [string]$result.Output.StandardOutput }
+                    if ($null -ne $result.Output.StdErr) { $stderr = [string]$result.Output.StdErr }
+                    elseif ($null -ne $result.Output.StandardError) { $stderr = [string]$result.Output.StandardError }
+                  }
+
+                  Write-Host '========================================'
+                  Write-Host 'ISOLATED WINDOWS INTEGRATION FAILURE'
+                  Write-Host '========================================'
+                  Write-Host "Test: $fqn"
+                  Write-Host "Test Name: $name"
+                  Write-Host "Duration: $duration"
+                  Write-Host "Outcome: $outcome"
+                  Write-Host 'Error:'
+                  Write-Host $msg
+                  Write-Host 'Stack trace:'
+                  Write-Host $stack
+                  Write-Host 'StdOut:'
+                  Write-Host $stdout
+                  Write-Host 'StdErr:'
+                  Write-Host $stderr
+                  Write-Host '========================================'
+
+                  @"
+### Failed test
+
+**Test**
+`$fqn`
+
+**Duration**
+`$duration`
+
+**Outcome**
+`$outcome`
+
+**Error**
+```
+$msg
+```
+
+**Stack trace**
+```
+$stack
+```
+
+**StdOut**
+```text
+$stdout
+```
+
+**StdErr**
+```text
+$stderr
+```
+
+"@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+                }
+              }
+            }
+            catch {
+              Write-Host "Failed to parse TRX evidence: $($_.Exception.Message)"
+            }
+          }
+
+          if (($null -eq $env:ISOLATED_EXIT_CODE) -or ($env:ISOLATED_EXIT_CODE -eq '')) {
+            Write-Host "Isolated integration exit code was not captured."
+          }
+          else {
+            Write-Host "Captured isolated integration exit code: $($env:ISOLATED_EXIT_CODE)"
+          }
 
       - name: Run disposable WinRE WIM servicing tests
+        if: steps.run_isolated_windows_integration.outputs.test_exit_code == '0'
         run: >-
           dotnet test CleanSwitch.sln --configuration Release --no-restore
           -p:CleanSwitchLiveTestBuild=true
           --filter "FullyQualifiedName~WinReServicingWorkspaceTests"
           --logger "trx;LogFileName=winre-wim-integration.trx"
           --results-directory TestResults/winre-wim-integration
+
+      - name: Fail isolated integration job on test failure
+        if: steps.run_isolated_windows_integration.outputs.test_exit_code != '0'
+        run: |
+          exit 1
 
       - name: Upload isolated-integration evidence
         if: always()
