@@ -10,7 +10,7 @@ internal sealed class WinReDeploymentVmIntegrationFactAttribute : FactAttribute
         if (!string.Equals(enabled, "1", StringComparison.Ordinal) ||
             string.IsNullOrWhiteSpace(harness) || !File.Exists(harness))
         {
-            Skip = "Requires an explicitly supplied disposable-VM deployment harness; never runs against the host.";
+            Skip = "Requires an explicitly supplied disposable-VM end-to-end retirement harness; never runs against the host.";
         }
     }
 }

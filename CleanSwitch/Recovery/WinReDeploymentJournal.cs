@@ -31,7 +31,9 @@ public enum WinReDeploymentStage
     Committed,
     RollbackIntent,
     RolledBack,
-    RecoveryRequired
+    RecoveryRequired,
+    // Appended to preserve the numeric values already persisted for all legacy stages.
+    DeploymentVerified
 }
 
 public enum WinReJournalRecordKind
@@ -282,6 +284,36 @@ public sealed class FileWinReDeploymentJournal : IWinReDeploymentJournal
 public sealed record WinReDeploymentJournalInventory(
     IReadOnlyList<WinReDeploymentJournalSnapshot> Active,
     IReadOnlyList<string> Invalid);
+
+public static class WinReDeploymentCommitSelection
+{
+    public static WinReDeploymentJournalSnapshot RequireExactAwaitingSmoke(
+        WinReDeploymentJournalInventory inventory,
+        string transactionId)
+    {
+        ArgumentNullException.ThrowIfNull(inventory);
+        if (!Guid.TryParseExact(transactionId, "N", out _))
+            throw new InvalidOperationException("--deployment-transaction must be one exact N-format transaction id.");
+        if (inventory.Invalid.Count != 0)
+            throw new InvalidOperationException(
+                "Deployment commit refuses corrupt, inaccessible, or unreconciled journal state: " +
+                string.Join(" | ", inventory.Invalid));
+        if (inventory.Active.Count != 1)
+            throw new InvalidOperationException(
+                $"Deployment commit requires exactly one authoritative unresolved transaction; found {inventory.Active.Count}.");
+
+        var active = inventory.Active[0];
+        if (active.Last.Stage != WinReDeploymentStage.AwaitingSmoke ||
+            !string.Equals(active.Plan.TransactionId, transactionId, StringComparison.Ordinal) ||
+            !string.Equals(active.Last.TransactionId, transactionId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Deployment commit requires the explicitly named authoritative transaction at exactly AwaitingSmoke.");
+        }
+
+        return active;
+    }
+}
 
 public static class WinReDeploymentJournalDiscovery
 {

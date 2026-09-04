@@ -78,11 +78,11 @@ internal static class StartupFlow
             throw new ArgumentNullException(nameof(userInterface));
 
         report("An incomplete or invalid WinRE deployment transaction exists.");
-        report("CleanSwitch will not start a new operation or its GUI until deterministic rollback recovery completes.");
+        report("CleanSwitch will not start a new operation or its GUI until the deployment journal becomes terminal.");
         foreach (var item in inventory.Invalid) report("INVALID: " + item);
         foreach (var item in inventory.Active)
             report($"ACTIVE: {item.Path} stage={item.Last.Stage} sequence={item.Last.Sequence}");
-        report("Use --winre-deployment-status or --recover-winre-deployment. No mutation was attempted.");
+        report("Use --winre-deployment-status. An exact AwaitingSmoke transaction may be independently verified with --commit-winre-deployment; other incomplete states require --recover-winre-deployment. No mutation was attempted.");
 
         if (showModal)
         {

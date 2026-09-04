@@ -7,7 +7,7 @@ namespace CleanSwitch.Tests;
 public sealed class WinReDeploymentVmIntegrationTests
 {
     [WinReDeploymentVmIntegrationFact]
-    public async Task Three_disposable_VM_cycles_prepare_deploy_review_smoke_and_restore_original()
+    public async Task Three_disposable_VM_cycles_execute_complete_retirement_then_restore_the_pristine_checkpoint()
     {
         var harness = Environment.GetEnvironmentVariable("CLEAN_SWITCH_WINRE_DEPLOYMENT_VM_HARNESS")!;
         Assert.EndsWith("winre-vm-harness.ps1", Path.GetFileName(harness),
@@ -42,15 +42,16 @@ public sealed class WinReDeploymentVmIntegrationTests
 
                 var result = JsonSerializer.Deserialize<VmCycleResult>(File.ReadAllText(output),
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
-                Assert.True(result.Prepared);
-                Assert.True(result.Deployed);
-                Assert.True(result.ReviewPassed);
-                Assert.True(result.SmokePassed);
-                Assert.True(result.RolledBack);
-                Assert.Equal(result.OriginalWimSha256, result.RestoredWimSha256, ignoreCase: true);
-                Assert.True(result.ProtectedBcdUnchanged);
-                Assert.True(result.GptUnchanged);
-                Assert.True(result.RetirementStateUnchanged);
+                Assert.True(result.Passed);
+                Assert.Equal(cycle, result.Cycle);
+                Assert.True(result.GuestDisksFileBacked);
+                Assert.Equal(result.PreparedWimSha256, result.DeployedWimSha256, ignoreCase: true);
+                Assert.Equal("COMPLETE", result.RetirementStateStatus);
+                Assert.Equal(1, result.DestructiveDeletionCount);
+                Assert.InRange(result.BcdDeletionCount, 0, 1);
+                Assert.True(result.NoUnresolvedJournal);
+                Assert.True(result.CheckpointRestoredAfterEvidence);
+                Assert.Matches("^[0-9A-Fa-f]{64}$", result.ArtifactManifestSha256);
             }
             finally
             {
@@ -60,14 +61,15 @@ public sealed class WinReDeploymentVmIntegrationTests
     }
 
     private sealed record VmCycleResult(
-        bool Prepared,
-        bool Deployed,
-        bool ReviewPassed,
-        bool SmokePassed,
-        bool RolledBack,
-        string OriginalWimSha256,
-        string RestoredWimSha256,
-        bool ProtectedBcdUnchanged,
-        bool GptUnchanged,
-        bool RetirementStateUnchanged);
+        bool Passed,
+        int Cycle,
+        bool GuestDisksFileBacked,
+        string PreparedWimSha256,
+        string DeployedWimSha256,
+        string RetirementStateStatus,
+        int DestructiveDeletionCount,
+        int BcdDeletionCount,
+        bool NoUnresolvedJournal,
+        bool CheckpointRestoredAfterEvidence,
+        string ArtifactManifestSha256);
 }

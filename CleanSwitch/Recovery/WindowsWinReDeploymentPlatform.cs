@@ -138,7 +138,7 @@ public static class WinReDeploymentPlanBuilder
         };
     }
 
-    private static bool LauncherManifestMatches(WinReLauncherManifest actual, WinReLauncherManifest expected) =>
+    internal static bool LauncherManifestMatches(WinReLauncherManifest actual, WinReLauncherManifest expected) =>
         actual.SchemaVersion == expected.SchemaVersion &&
         string.Equals(actual.RecoveryGuid, expected.RecoveryGuid, StringComparison.Ordinal) &&
         string.Equals(actual.ExecutableRelativePath, expected.ExecutableRelativePath, StringComparison.Ordinal) &&
@@ -381,6 +381,77 @@ public sealed class WindowsWinReDeploymentPlatform : IWinReDeploymentPlatform
         if (recovery.Identifier is null || recovery.Entry is null) return Fail(recovery.Report.Describe());
         var result = await new WindowsWinReLauncherValidator(_options, _log).ValidateAsync(recovery);
         return result.Passed ? Pass(result.Report.Describe()) : Fail(result.Report.Describe());
+    }
+
+    public async Task<WinReDeploymentVerification> VerifyTerminalCommitAsync(WinReDeploymentPlan plan)
+    {
+        var paths = ValidatePlanPaths(plan);
+        if (!paths.Passed) return paths;
+        var sourceCopyDirectory = Path.GetDirectoryName(plan.PreparedWimPath)!;
+        var operationRoot = Directory.GetParent(sourceCopyDirectory)?.FullName ?? string.Empty;
+        if (!string.Equals(Path.GetFileName(sourceCopyDirectory), "source-copy", StringComparison.Ordinal) ||
+            !Path.GetFileName(operationRoot).StartsWith("operation-", StringComparison.Ordinal) ||
+            !Guid.TryParseExact(Path.GetFileName(operationRoot)["operation-".Length..], "N", out _) ||
+            !string.Equals(Path.GetFullPath(plan.PreparedBundlePath),
+                Path.Combine(operationRoot, "prepared-winre-bundle.json"), StringComparison.OrdinalIgnoreCase))
+            return Fail("Prepared WIM and bundle are not the exact owned sealed preparation workspace pair.");
+        var servicing = WindowsServicingPreflight.DescribeBlocker();
+        if (servicing is not null) return Fail(servicing);
+        if (!HashEquals(plan.PreparedWimPath, plan.PreparedWimSha256) ||
+            !HashEquals(plan.PreparedBundlePath, plan.PreparedBundleSha256))
+            return Fail("Prepared WIM or sealed preparation bundle hash drifted before commit.");
+        if (!HashEquals(plan.BackupWimPath, plan.ExpectedOriginalWimSha256))
+            return Fail("The exact original WinRE backup is unavailable or its hash drifted.");
+        if (!HashEquals(plan.LiveWimPath, plan.PreparedWimSha256) ||
+            File.Exists(plan.IncomingWimPath) || File.Exists(plan.LiveWimPath + ".rollback-incoming"))
+            return Fail("Installed WIM hash or pending incoming/rollback file state is unsafe.");
+
+        PreparedWinReBundleManifest bundle;
+        try
+        {
+            bundle = JsonSerializer.Deserialize<PreparedWinReBundleManifest>(
+                File.ReadAllText(plan.PreparedBundlePath),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? throw new InvalidDataException("Prepared WinRE bundle is empty.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return Fail("Prepared WinRE bundle is unreadable: " + exception.Message);
+        }
+
+        var expectedLauncher = WindowsWinReLauncherValidator.CreateCurrentExpectation(
+            _options, plan.ExpectedRecoveryGuid).Manifest;
+        var bundleMatches = bundle.SchemaVersion == PreparedWinReBundleManifest.CurrentSchemaVersion &&
+            Guid.TryParseExact(bundle.BundleId, "N", out _) && bundle.CreatedAtUtc != default &&
+            string.Equals(bundle.PreparedWimFileName, Path.GetFileName(plan.PreparedWimPath), StringComparison.Ordinal) &&
+            bundle.PreparedWimSize == new FileInfo(plan.PreparedWimPath).Length &&
+            bundle.OriginalLiveWimSize == new FileInfo(plan.BackupWimPath).Length &&
+            string.Equals(bundle.PreparedWimSha256, plan.PreparedWimSha256, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(bundle.ExpectedOriginalWimSha256, plan.ExpectedOriginalWimSha256, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(bundle.ObservedOriginalWimSha256, plan.ObservedOriginalWimSha256, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(bundle.OriginalLiveWimSha256, plan.OriginalWimSha256, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(Path.GetFullPath(bundle.OriginalLiveWimPath), Path.GetFullPath(plan.LiveWimPath), StringComparison.OrdinalIgnoreCase) &&
+            WinReDeploymentPlanBuilder.LauncherManifestMatches(bundle.Launcher, expectedLauncher) &&
+            string.Equals(bundle.Launcher.ProductVersion, plan.ProductVersion, StringComparison.Ordinal) &&
+            string.Equals(bundle.Launcher.ExecutableSha256, plan.ExecutableSha256, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(bundle.Launcher.ConfigurationSha256, plan.ConfigurationSha256, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(bundle.Launcher.RecoveryDataVolumeGptId, plan.RecoveryDataVolumeGptId, StringComparison.OrdinalIgnoreCase);
+        if (!bundleMatches)
+            return Fail("Prepared bundle is stale or belongs to another build, manifest, configuration, RecoveryGuid, WIM, or RecoveryData identity.");
+
+        var ownedMount = Path.Combine(operationRoot, "mount");
+        if (Directory.Exists(ownedMount) && Directory.EnumerateFileSystemEntries(ownedMount).Any())
+            return Fail("The owned preparation workspace mount directory is not empty.");
+        var mounted = await RunRequiredAsync("dism.exe", ["/English", "/Get-MountedImageInfo"]);
+        if (mounted.StdOut.Contains(ownedMount, StringComparison.OrdinalIgnoreCase))
+            return Fail("DISM still reports the owned preparation workspace as mounted.");
+
+        var live = await VerifyPostSmokeAsync(plan);
+        if (!live.Passed || !BcdIdentifiers.IdsEqual(live.RecoveryGuid, plan.ExpectedRecoveryGuid))
+            return Fail("Live WinRE terminal verification failed: " + live.Detail);
+        return new WinReDeploymentVerification(true,
+            "Sealed source/build, original backup, installed WIM, launcher, REAgentC location/enabled state, RecoveryGuid, GPT/state, and servicing cleanup are terminal-safe.",
+            live.RecoveryGuid);
     }
 
     public async Task<WinReDeploymentVerification> VerifyPostSmokeAsync(WinReDeploymentPlan plan)

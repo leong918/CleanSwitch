@@ -9,7 +9,7 @@ param(
     [string] $ResultPath,
     [Parameter(ParameterSetName = 'Command', Mandatory = $true)]
     [ValidateSet('checkpoint', 'restore', 'start', 'stop', 'hard-poweroff',
-        'guest-command', 'reboot-to-winre', 'collect-artifacts')]
+        'guest-command', 'wait-for-guest', 'collect-artifacts')]
     [string] $Command,
     [Parameter(ParameterSetName = 'Command')]
     [string] $ArgumentsJson = '{}',
@@ -20,7 +20,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:RequiredProviderCommands = @('inspect', 'checkpoint', 'restore', 'start', 'stop',
-    'hard-poweroff', 'guest-command', 'reboot-to-winre', 'collect-artifacts')
+    'hard-poweroff', 'guest-command', 'wait-for-guest', 'collect-artifacts')
 $script:AllowedDiskExtensions = @('.vhd', '.vhdx', '.vmdk', '.qcow2')
 
 function Write-DurableJson {
@@ -68,12 +68,22 @@ function Get-HarnessConfiguration {
     $configPath = [IO.Path]::GetFullPath($configPath)
     if (-not [IO.File]::Exists($configPath)) { throw "VM harness configuration does not exist: $configPath" }
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-    if ((Get-RequiredProperty $config 'schemaVersion') -ne 1) { throw 'VM harness configuration schemaVersion must be 1.' }
+    if ((Get-RequiredProperty $config 'schemaVersion') -ne 2) { throw 'VM harness configuration schemaVersion must be 2.' }
     if ((Get-RequiredProperty $config 'disposable') -ne $true) {
         throw 'The VM configuration is not explicitly marked disposable=true.'
     }
     $vmId = [string](Get-RequiredProperty $config 'vmId')
     if ($vmId -notmatch '^[A-Za-z0-9._-]{1,128}$') { throw 'VM identity contains unsupported characters.' }
+    $vmGuid = [string](Get-RequiredProperty $config 'vmGuid')
+    $checkpointGuid = [string](Get-RequiredProperty $config 'pristineCheckpointGuid')
+    if ($vmGuid -notmatch '^\{?[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}?$') {
+        throw 'vmGuid must be a concrete GUID.'
+    }
+    if ($checkpointGuid -notmatch '^\{?[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}?$') {
+        throw 'pristineCheckpointGuid must be a concrete GUID.'
+    }
+    $sourceCommit = [string](Get-RequiredProperty $config 'sourceCommit')
+    if ($sourceCommit -notmatch '^[0-9a-fA-F]{40}$') { throw 'sourceCommit must be an exact 40-hex commit SHA.' }
     $providerPath = [IO.Path]::GetFullPath([string](Get-RequiredProperty $config 'providerScript'))
     if (-not [IO.File]::Exists($providerPath)) { throw "VM provider script does not exist: $providerPath" }
     if ([IO.Path]::GetExtension($providerPath) -ine '.ps1') { throw 'VM provider must be an explicit PowerShell script.' }
@@ -205,6 +215,26 @@ function Assert-GuestResult {
     return $result
 }
 
+function Assert-TrueProperty {
+    param([object] $Object, [string] $Name, [string] $Failure)
+    if ((Get-RequiredProperty $Object $Name) -ne $true) { throw $Failure }
+}
+
+function Get-RequiredSha256 {
+    param([object] $Object, [string] $Name)
+    $value = [string](Get-RequiredProperty $Object $Name)
+    if ($value -notmatch '^[0-9A-Fa-f]{64}$') { throw "Property '$Name' is not a SHA256 value." }
+    return $value.ToUpperInvariant()
+}
+
+function Get-RequiredGuid {
+    param([object] $Object, [string] $Name)
+    $value = [string](Get-RequiredProperty $Object $Name)
+    $parsed = [Guid]::Empty
+    if (-not [Guid]::TryParse($value, [ref]$parsed)) { throw "Property '$Name' is not a concrete GUID." }
+    return $parsed.ToString('D')
+}
+
 function Invoke-GuestAction {
     param([object] $Config, [string] $Action, [hashtable] $Extra = @{})
     $arguments = @{ action = $Action; correlationId = [Guid]::NewGuid().ToString('N'); timeoutSeconds = 1800 }
@@ -248,10 +278,17 @@ function Get-ReadinessReport {
     $data = Get-RequiredProperty $inspection 'data'
     $build = [int](Get-RequiredProperty $data 'windowsBuild')
     if ($build -lt 22000) { throw "Guest is not Windows 11 compatible: build $build" }
+    $observedVmGuid = Get-RequiredGuid $data 'vmGuid'
+    $expectedVmGuid = ([Guid]([string](Get-RequiredProperty $Config 'vmGuid'))).ToString('D')
+    if ($observedVmGuid -cne $expectedVmGuid) { throw 'Provider inspection returned the wrong VM GUID.' }
+    $diskPaths = @((Get-RequiredProperty $data 'disks') | ForEach-Object {
+        [IO.Path]::GetFullPath([string](Get-RequiredProperty $_ 'hostPath'))
+    })
     return [ordered]@{
-        Ready = $true; VmId = [string]$Config.vmId; Disposable = $true; WindowsBuild = $build
+        Ready = $true; VmId = [string]$Config.vmId; VmGuid = $observedVmGuid
+        Disposable = $true; WindowsBuild = $build
         Firmware = [string]$data.firmware; PartitionStyle = [string]$data.partitionStyle
-        GuestDiskCount = @($data.disks).Count; GuestDisksFileBacked = $true
+        GuestDiskCount = @($data.disks).Count; GuestDiskPaths = $diskPaths; GuestDisksFileBacked = $true
         PhysicalHostDiskReferenceFound = $false; CheckpointRestoreProven = (Test-CheckpointRestore $Config)
         SourceCommit = [string](Get-RequiredProperty $Config 'sourceCommit')
         ConfigurationSha256 = [string]$Config.ConfigurationSha256
@@ -264,45 +301,160 @@ function Invoke-Cycle {
     $readiness = Get-ReadinessReport $Config
     $baseline = [string](Get-RequiredProperty $Config 'baselineCheckpoint')
     Invoke-Provider $Config 'hard-poweroff' @{ reason = "cycle-$CycleNumber-baseline-restore" } | Out-Null
-    Invoke-Provider $Config 'restore' @{ name = $baseline } | Out-Null
+    $restore = Invoke-Provider $Config 'restore' @{ name = $baseline }
+    $restoredCheckpointGuid = Get-RequiredGuid (Get-RequiredProperty $restore 'data') 'checkpointGuid'
+    $expectedCheckpointGuid = ([Guid]([string](Get-RequiredProperty $Config 'pristineCheckpointGuid'))).ToString('D')
+    if ($restoredCheckpointGuid -cne $expectedCheckpointGuid) { throw 'Provider restored the wrong pristine checkpoint GUID.' }
     Invoke-Provider $Config 'start' @{} | Out-Null
-    $pre = Invoke-GuestAction $Config 'pre-cycle' @{ cycle = $CycleNumber; expectedSourceCommit = $readiness.SourceCommit }
-    if ((Get-RequiredProperty $pre 'noPendingRetirement') -ne $true) { throw 'Guest has an active retirement operation.' }
+    $pre = Invoke-GuestAction $Config 'pre-retirement' @{ cycle = $CycleNumber; expectedSourceCommit = $readiness.SourceCommit }
     if ([string](Get-RequiredProperty $pre 'sourceCommit') -cne $readiness.SourceCommit) { throw 'Guest source commit mismatch.' }
+    foreach ($check in 'pristineLayoutVerified', 'boot1BcdLoaderPresent', 'terminalOrAbsentRetirementState', 'noUnresolvedJournal') {
+        Assert-TrueProperty $pre $check "Pristine pre-retirement invariant failed: $check"
+    }
+    $cleanSwitchExe = Get-RequiredSha256 $pre 'cleanSwitchExecutableSha256'
+    $cleanSwitchConfig = Get-RequiredSha256 $pre 'cleanSwitchConfigurationSha256'
+    $originalWim = Get-RequiredSha256 $pre 'originalWimSha256'
+    $preGpt = Get-RequiredSha256 $pre 'preRetirementGptFingerprint'
+    $preBcd = Get-RequiredSha256 $pre 'preRetirementBcdFingerprint'
+    $boot1Gpt = Get-RequiredGuid $pre 'boot1PartitionGptId'
+    $boot2Gpt = Get-RequiredGuid $pre 'boot2PartitionGptId'
+    $recoveryDataGpt = Get-RequiredGuid $pre 'recoveryDataPartitionGptId'
+    $espGpt = Get-RequiredGuid $pre 'espPartitionGptId'
+    $boot2RecoveryGpt = Get-RequiredGuid $pre 'boot2RecoveryPartitionGptId'
+    $originalRecoveryGuid = Get-RequiredGuid $pre 'recoveryGuid'
     $prepared = Invoke-GuestAction $Config 'prepare-seal' @{ cycle = $CycleNumber }
+    Assert-TrueProperty $prepared 'sealedBundleVerified' 'Prepared WinRE bundle was not sealed and verified.'
+    $preparedWim = Get-RequiredSha256 $prepared 'preparedWimSha256'
+    $preparedBundle = Get-RequiredSha256 $prepared 'preparedBundleSha256'
     $deployed = Invoke-GuestAction $Config 'deploy' @{ cycle = $CycleNumber }
+    if ([string](Get-RequiredProperty $deployed 'deploymentJournalStage') -cne 'AwaitingSmoke') {
+        throw 'WinRE deployment did not stop at the exact independently reviewable AwaitingSmoke boundary.'
+    }
+    $deploymentTransactionId = [string](Get-RequiredProperty $deployed 'deploymentTransactionId')
+    $parsedTransaction = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($deploymentTransactionId, 'N', [ref]$parsedTransaction)) {
+        throw 'WinRE deployment returned a malformed transaction id.'
+    }
+    $deployedWim = Get-RequiredSha256 $deployed 'deployedWimSha256'
+    if ($preparedWim -cne $deployedWim) { throw 'Deployed WinRE hash does not equal the sealed prepared WIM hash.' }
+    $deployedRecoveryGuid = Get-RequiredGuid $deployed 'recoveryGuid'
+    if ($deployedRecoveryGuid -cne $originalRecoveryGuid) { throw 'WinRE deployment changed RecoveryGuid.' }
     $review = Invoke-GuestAction $Config 'review' @{ cycle = $CycleNumber }
-    if ((Get-RequiredProperty $review 'passed') -ne $true) { throw 'Post-deployment launcher review failed.' }
-    Invoke-Provider $Config 'reboot-to-winre' @{ cycle = $CycleNumber } | Out-Null
-    $smoke = Invoke-GuestAction $Config 'verify-winre-smoke' @{ cycle = $CycleNumber }
-    foreach ($required in 'smokePassed', 'receiptVerified', 'cleanSwitchFirst', 'recEnvSecond', 'destructiveExecutorUnreachable', 'returnedToWindows') {
-        if ((Get-RequiredProperty $smoke $required) -ne $true) { throw "WinRE smoke invariant failed: $required" }
+    Assert-TrueProperty $review 'passed' 'Post-deployment launcher review failed.'
+    $launcherContract = Get-RequiredSha256 $review 'launcherContractSha256'
+    $reviewRecoveryGuid = Get-RequiredGuid $review 'recoveryGuid'
+    if ($reviewRecoveryGuid -cne $originalRecoveryGuid) { throw 'Launcher review RecoveryGuid differs from the pristine identity.' }
+
+    $committed = Invoke-GuestAction $Config 'commit-winre-deployment' @{
+        cycle = $CycleNumber; deploymentTransactionId = $deploymentTransactionId
     }
-    Invoke-GuestAction $Config 'rollback' @{ cycle = $CycleNumber } | Out-Null
-    $post = Invoke-GuestAction $Config 'post-cycle-verify' @{ cycle = $CycleNumber }
-    foreach ($required in 'winReEnabled', 'protectedBcdUnchanged', 'gptUnchanged', 'retirementStateUnchanged', 'noPendingRetirement', 'noUnresolvedJournal', 'noResidualMounts') {
-        if ((Get-RequiredProperty $post $required) -ne $true) { throw "Post-cycle invariant failed: $required" }
+    Assert-TrueProperty $committed 'deploymentJournalTerminal' 'Explicit WinRE deployment commit did not produce a terminal journal.'
+    Assert-TrueProperty $committed 'noUnresolvedJournal' 'Explicit WinRE deployment commit left an unresolved journal.'
+    if ([string](Get-RequiredProperty $committed 'deploymentJournalResult') -cne 'COMMITTED') {
+        throw 'Explicit WinRE deployment commit did not finish COMMITTED.'
     }
-    $original = [string](Get-RequiredProperty $pre 'originalWimSha256')
-    $restored = [string](Get-RequiredProperty $post 'restoredWimSha256')
-    if ($original -cne $restored) { throw 'Rollback did not restore the exact original WIM SHA256.' }
+    if ([string](Get-RequiredProperty $committed 'deploymentTransactionId') -cne $deploymentTransactionId) {
+        throw 'Explicit WinRE deployment commit returned the wrong transaction id.'
+    }
+    if ((Get-RequiredSha256 $committed 'installedWimSha256') -cne $deployedWim -or
+        (Get-RequiredGuid $committed 'recoveryGuid') -cne $originalRecoveryGuid) {
+        throw 'Explicit WinRE deployment commit changed the installed WIM or RecoveryGuid identity.'
+    }
+    $deploymentJournal = Get-RequiredSha256 $committed 'deploymentJournalSha256'
+
+    $handoff = Invoke-GuestAction $Config 'start-retirement' @{ cycle = $CycleNumber }
+    foreach ($check in 'acceptedByProduct', 'phase2AHandoffCommitted', 'boot2PersistentDefault', 'boot2RecoveryOneShotArmed') {
+        Assert-TrueProperty $handoff $check "Phase2A retirement handoff invariant failed: $check"
+    }
+    if ([string](Get-RequiredProperty $handoff 'productPath') -cne 'RETIRE SYSTEM') {
+        throw 'Retirement was not initiated through the product-supported RETIRE SYSTEM path.'
+    }
+    if ([string](Get-RequiredProperty $handoff 'handoffAuthorizationState') -cne 'COMMITTED') {
+        throw 'Phase2A handoff authorization is not COMMITTED.'
+    }
+    $phase2AState = Get-RequiredSha256 $handoff 'phase2AStateSha256'
+    $handoffBinding = Get-RequiredSha256 $handoff 'handoffBindingSha256'
+
+    $wait = Invoke-Provider $Config 'wait-for-guest' @{ cycle = $CycleNumber; expectedWindowsRole = 'Boot2'; timeoutSeconds = 1800 }
+    $waitData = Get-RequiredProperty $wait 'data'
+    Assert-TrueProperty $waitData 'booted' 'Boot2 Windows did not return after retirement.'
+    if ([string](Get-RequiredProperty $waitData 'windowsRole') -cne 'Boot2') { throw 'The post-retirement guest is not Boot2.' }
+
+    $post = Invoke-GuestAction $Config 'verify-retirement' @{ cycle = $CycleNumber }
+    foreach ($check in 'winpeshlRecoveryLaunchObserved', 'dispatcherSelectedRetirement',
+        'recoveryRunnerCompleted', 'phase2BFreshValidationPassed', 'boot1PartitionAbsent',
+        'boot1BcdLoaderAbsent', 'boot2PartitionPresent', 'boot2LoaderPersistentDefault',
+        'recoveryDataPresent', 'espPresent', 'boot2RecoveryPartitionPresent', 'boot2WinRePresent',
+        'retirementStateComplete', 'completeStartupRecorded', 'noUnresolvedJournal',
+        'postRetirementReAgentCValid') {
+        Assert-TrueProperty $post $check "End-to-end retirement invariant failed: $check"
+    }
+    if ([int](Get-RequiredProperty $post 'destructiveDeletionCount') -ne 1) {
+        throw 'Boot1 destructive deletion must execute exactly once.'
+    }
+    $bcdDeleteCount = [int](Get-RequiredProperty $post 'bcdDeletionCount')
+    if ($bcdDeleteCount -lt 0 -or $bcdDeleteCount -gt 1) { throw 'Boot1 BCD deletion may execute at most once.' }
+    if ([string](Get-RequiredProperty $post 'retirementStateStatus') -cne 'COMPLETE') {
+        throw 'Final retirement state is not COMPLETE.'
+    }
+    foreach ($identity in @{
+        boot1PartitionGptId = $boot1Gpt; boot2PartitionGptId = $boot2Gpt
+        recoveryDataPartitionGptId = $recoveryDataGpt; espPartitionGptId = $espGpt
+        boot2RecoveryPartitionGptId = $boot2RecoveryGpt; recoveryGuid = $originalRecoveryGuid
+    }.GetEnumerator()) {
+        if ((Get-RequiredGuid $post $identity.Key) -cne $identity.Value) {
+            throw "Post-retirement identity mismatch: $($identity.Key)"
+        }
+    }
+    $postGpt = Get-RequiredSha256 $post 'postDeleteGptFingerprint'
+    $finalBcd = Get-RequiredSha256 $post 'finalBcdFingerprint'
+    if ($postGpt -ceq $preGpt) { throw 'GPT fingerprint did not change after the verified Boot1 deletion.' }
+    if ($finalBcd -ceq $preBcd) { throw 'BCD fingerprint did not change after verified Boot1 loader removal.' }
+    $recoveryLog = Get-RequiredSha256 $post 'recoveryRunnerLogSha256'
+    $finalState = Get-RequiredSha256 $post 'finalRetirementStateSha256'
+    $reAgentC = [string](Get-RequiredProperty $post 'postRetirementReAgentCStatus')
+    $resolvedBoot1 = Get-RequiredProperty $post 'resolvedBoot1Identity'
+    if ((Get-RequiredGuid $resolvedBoot1 'partitionGptId') -cne $boot1Gpt -or
+        [int](Get-RequiredProperty $resolvedBoot1 'diskNumber') -lt 0 -or
+        [int](Get-RequiredProperty $resolvedBoot1 'partitionNumber') -lt 1) {
+        throw 'Resolved destructive Boot1 identity is incomplete or does not match the pristine Boot1 GPT.'
+    }
+
     $artifactDestination = Join-Path ([IO.Path]::GetFullPath([string](Get-RequiredProperty $Config 'artifactRoot'))) "cycle-$CycleNumber"
     $artifacts = Invoke-Provider $Config 'collect-artifacts' @{ cycle = $CycleNumber; destination = $artifactDestination }
+    $artifactData = Get-RequiredProperty $artifacts 'data'
+    $artifactManifest = [IO.Path]::GetFullPath([string](Get-RequiredProperty $artifactData 'manifestPath'))
+    $artifactManifestSha256 = Get-RequiredSha256 $artifactData 'manifestSha256'
+    $artifactRoot = [IO.Path]::GetFullPath($artifactDestination).TrimEnd('\')
+    if (-not $artifactManifest.StartsWith($artifactRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        -not [IO.File]::Exists($artifactManifest) -or
+        (Get-Sha256 $artifactManifest) -cne $artifactManifestSha256) {
+        throw 'Artifact manifest is missing, outside the cycle destination, or its SHA256 does not match.'
+    }
+    Invoke-Provider $Config 'stop' @{ graceful = $true } | Out-Null
+    Invoke-Provider $Config 'hard-poweroff' @{ reason = "cycle-$CycleNumber-post-evidence-reset" } | Out-Null
+    $reset = Invoke-Provider $Config 'restore' @{ name = $baseline }
+    if ((Get-RequiredGuid (Get-RequiredProperty $reset 'data') 'checkpointGuid') -cne $expectedCheckpointGuid) {
+        throw 'Post-evidence reset restored the wrong pristine checkpoint GUID.'
+    }
     return [ordered]@{
-        Prepared = $true; Deployed = $true; ReviewPassed = $true; SmokePassed = $true; RolledBack = $true
-        OriginalWimSha256 = $original
-        PreparedWimSha256 = [string](Get-RequiredProperty $prepared 'preparedWimSha256')
-        InstalledWimSha256 = [string](Get-RequiredProperty $deployed 'installedWimSha256')
-        RestoredWimSha256 = $restored
-        OriginalRecoveryGuid = [string](Get-RequiredProperty $pre 'recoveryGuid')
-        DeployedRecoveryGuid = [string](Get-RequiredProperty $deployed 'recoveryGuid')
-        RestoredRecoveryGuid = [string](Get-RequiredProperty $post 'recoveryGuid')
-        ProtectedBcdUnchanged = $true; GptUnchanged = $true; RetirementStateUnchanged = $true
-        NoUnresolvedJournal = $true; NoResidualMounts = $true
-        ReAgentCDisableMovedWim = [bool](Get-RequiredProperty $deployed 'reAgentCDisableMovedWim')
-        BcdSemanticDelta = Get-RequiredProperty $post 'bcdSemanticDelta'
-        ArtifactManifest = [string](Get-RequiredProperty (Get-RequiredProperty $artifacts 'data') 'manifestPath')
-        SourceCommit = $readiness.SourceCommit; Cycle = $CycleNumber
+        Passed = $true; Cycle = $CycleNumber; SourceCommit = $readiness.SourceCommit
+        VmGuid = $readiness.VmGuid; PristineCheckpointGuid = $restoredCheckpointGuid
+        GuestDiskPaths = $readiness.GuestDiskPaths; GuestDisksFileBacked = $true
+        CleanSwitchExecutableSha256 = $cleanSwitchExe; CleanSwitchConfigurationSha256 = $cleanSwitchConfig
+        OriginalWimSha256 = $originalWim; PreparedWimSha256 = $preparedWim
+        PreparedBundleSha256 = $preparedBundle; DeployedWimSha256 = $deployedWim
+        DeploymentTransactionId = $deploymentTransactionId; DeploymentJournalSha256 = $deploymentJournal
+        LauncherContractSha256 = $launcherContract; RecoveryGuid = $originalRecoveryGuid
+        PreRetirementGptFingerprint = $preGpt; PreRetirementBcdFingerprint = $preBcd
+        Phase2AStateSha256 = $phase2AState; HandoffBindingSha256 = $handoffBinding
+        RecoveryRunnerLogSha256 = $recoveryLog
+        ResolvedBoot1Identity = $resolvedBoot1; DestructiveDeletionCount = 1
+        BcdDeletionCount = $bcdDeleteCount; PostDeleteGptFingerprint = $postGpt
+        FinalBcdFingerprint = $finalBcd; FinalRetirementStateSha256 = $finalState
+        RetirementStateStatus = 'COMPLETE'; PostRetirementReAgentCStatus = $reAgentC
+        NoUnresolvedJournal = $true; ArtifactManifest = $artifactManifest
+        ArtifactManifestSha256 = $artifactManifestSha256; CheckpointRestoredAfterEvidence = $true
     }
 }
 

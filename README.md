@@ -406,6 +406,7 @@ opt-in:
 CleanSwitch.exe --deploy-winre-launcher --prepared-winre <prepared-Winre.wim> --execute-winre-deployment
 CleanSwitch.exe --winre-deployment-status
 CleanSwitch.exe --recover-winre-deployment --execute-winre-deployment
+CleanSwitch.exe --commit-winre-deployment --deployment-transaction <exact-id>
 ```
 
 Before each REAgentC or WIM mutation, an append-only SHA-256 chained journal writes and flushes
@@ -413,6 +414,11 @@ an intent record. Verification and a flushed completion record follow the operat
 non-terminal or malformed journal blocks GUI startup, RETIRE SYSTEM, recovery deletion, and a
 new deployment. Recovery is rollback-only; the complete BCD snapshot is never automatically
 imported. The transaction stops at `AwaitingSmoke` even after live launcher review passes.
+An operator may then explicitly terminalize that exact transaction without a separate smoke
+boot. The commit command revalidates the sealed source/build and backup, installed WIM hash,
+launcher, REAgentC enabled/location state, RecoveryGuid, GPT/state bindings, and owned DISM
+cleanup before appending `DeploymentVerified`, `CommitIntent`, and terminal `Committed`.
+This terminal deployment state grants no retirement authority.
 
 Inside WinRE, `--recovery-smoke --deployment-transaction <id>` is a separate non-retirement entry point. It validates the
 embedded manifest/payload and RecoveryData GPT identity, rejects an active retirement state,
@@ -423,8 +429,9 @@ After returning to Boot 2, the receipt is bound to the open journal with:
 CleanSwitch.exe --complete-winre-smoke --receipt <receipt.json>
 ```
 
-Only that step makes the deployment journal terminal. `--recovery-run --execute-deletion`
-remains exclusively the real PENDING retirement entry point.
+That smoke-backed completion path remains supported, but it is not the only terminalization
+path. `--recovery-run --execute-deletion` remains exclusively the real PENDING retirement
+entry point.
 
 Disposable real-VM validation uses the provider-neutral, fail-closed harness contract in
 [`docs/WINRE-VM-HARNESS.md`](docs/WINRE-VM-HARNESS.md). It requires an operator-supplied
