@@ -210,39 +210,40 @@ jobs:
                   Write-Host $stderr
                   Write-Host '========================================'
 
-                  @"
-### Failed test
-
-**Test**
-`$fqn`
-
-**Duration**
-`$duration`
-
-**Outcome**
-`$outcome`
-
-**Error**
-```
-$msg
-```
-
-**Stack trace**
-```
-$stack
-```
-
-**StdOut**
-```text
-$stdout
-```
-
-**StdErr**
-```text
-$stderr
-```
-
-"@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+                  $summary = @(
+                    '### Failed test'
+                    ''
+                    '**Test**'
+                    ('`' + $fqn + '`')
+                    ''
+                    '**Duration**'
+                    ('`' + $duration + '`')
+                    ''
+                    '**Outcome**'
+                    ('`' + $outcome + '`')
+                    ''
+                    '**Error**'
+                    '```'
+                    $msg
+                    '```'
+                    ''
+                    '**Stack trace**'
+                    '```'
+                    $stack
+                    '```'
+                    ''
+                    '**StdOut**'
+                    '```text'
+                    $stdout
+                    '```'
+                    ''
+                    '**StdErr**'
+                    '```text'
+                    $stderr
+                    '```'
+                    ''
+                  )
+                  $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
                 }
               }
             }
