@@ -119,7 +119,7 @@ public sealed class VhdDestructiveIntegrationTests
         var executor = new RetirementExecutor(
             RetirementFixtures.Options(enableDestructive: false),
             new RecordingOperationLog());
-        Assert.False(executor.IsDestructiveRetirementAvailable);
+        Assert.True(executor.IsDestructiveRetirementAvailable);
         Assert.False(executor.IsConfigEnabled);
 
         var appsettings = FindRepoAppsettings();

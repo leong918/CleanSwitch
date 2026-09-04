@@ -55,10 +55,12 @@ public static class GptPartitionTypes
 public sealed class DiskValidator
 {
     private readonly IOperationLog _log;
+    private readonly IGptLayoutSource? _gptObservationSource;
 
-    public DiskValidator(IOperationLog? log = null)
+    public DiskValidator(IOperationLog? log = null, IGptLayoutSource? gptObservationSource = null)
     {
         _log = log ?? NullOperationLog.Instance;
+        _gptObservationSource = gptObservationSource;
     }
 
     /// <summary>Identity of the volume the currently running Windows boots from.</summary>
@@ -95,6 +97,38 @@ public sealed class DiskValidator
         {
             error = $"'{gptPartitionId}' is not a GPT partition GUID.";
             return null;
+        }
+
+        if (_gptObservationSource is not null)
+        {
+            var matches = _gptObservationSource.Capture().WithGptId(gptId);
+            if (matches.Count != 1)
+            {
+                error = matches.Count == 0
+                    ? $"No partition in the injected GPT layout has GPT partition GUID {VolumeLocator.FormatGptId(gptId)}."
+                    : $"GPT partition GUID {VolumeLocator.FormatGptId(gptId)} matched {matches.Count} partitions in the injected GPT layout. Refusing to choose.";
+                return null;
+            }
+
+            var partition = matches[0];
+            var injectedIdentity = new PartitionIdentity
+            {
+                DiskNumber = partition.DiskNumber,
+                PartitionNumber = partition.PartitionNumber,
+                GptPartitionId = VolumeLocator.FormatGptId(partition.PartitionGptId),
+                GptPartitionType = partition.PartitionType is null
+                    ? null
+                    : VolumeLocator.FormatGptId(partition.PartitionType.Value),
+                DiskGptUniqueId = partition.DiskGptId is null
+                    ? null
+                    : VolumeLocator.FormatGptId(partition.DiskGptId.Value),
+                PartitionStartingOffset = partition.StartingOffset,
+                PartitionSizeBytes = partition.SizeBytes,
+                ObservedDriveLetter = partition.MountPoint,
+                Source = source
+            };
+            _log.Info("disk-validator", $"Observed {injectedIdentity.Describe()}");
+            return injectedIdentity;
         }
 
         var volume = VolumeLocator.TryFindUniqueByGptId(gptId, out error);

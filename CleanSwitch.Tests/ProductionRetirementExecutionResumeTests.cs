@@ -31,7 +31,7 @@ public sealed class ProductionRetirementExecutionResumeTests
         var execution = new ProductionRetirementExecution(
             new FakeBootManager(),
             coordinator,
-            new DiskValidator(log),
+            CreatePostBoot1RetiredDiskValidator(log),
             executor,
             new RetirementHardwareReview(
                 new FakeGptLayoutSource(RetirementFixtures.StandardLayout()),
@@ -51,7 +51,7 @@ public sealed class ProductionRetirementExecutionResumeTests
         Assert.Contains("[PASS]", result.Message, StringComparison.Ordinal);
         Assert.Equal(0, diskCommand.ExecuteCount);
         Assert.Equal(0, bcdCommand.ExecuteCount);
-        Assert.Equal(RetirementStatus.Boot1Retired, coordinator.State!.Status);
+        Assert.Equal(RetirementStatus.BcdUpdated, coordinator.State!.Status);
     }
 
     [LiveTestBuildFact]
@@ -173,7 +173,7 @@ public sealed class ProductionRetirementExecutionResumeTests
         return new ProductionRetirementExecution(
             new FakeBootManager(),
             coordinator,
-            new DiskValidator(log),
+            CreatePostBoot1RetiredDiskValidator(log),
             executor,
             new RetirementHardwareReview(
                 new FakeGptLayoutSource(RetirementFixtures.StandardLayout()),
@@ -184,4 +184,9 @@ public sealed class ProductionRetirementExecutionResumeTests
             options,
             log);
     }
+
+    private static DiskValidator CreatePostBoot1RetiredDiskValidator(RecordingOperationLog log) =>
+        new(
+            log,
+            new FakeGptLayoutSource(RealMachineRetirementFixtures.PostBoot1RetiredGptSnapshot()));
 }

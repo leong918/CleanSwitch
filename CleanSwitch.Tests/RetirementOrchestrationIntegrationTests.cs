@@ -48,7 +48,7 @@ public sealed class RetirementOrchestrationIntegrationTests(ITestOutputHelper ou
                 bcd.CreateStoreSource(),
                 bcd.RecoveryId);
             var diskCommand = new VhdBoundDiskCommand(vhd, log);
-            var bcdCommand = bcd.CreateBoundCommand(log);
+            var bcdCommand = (StoreBoundBcdCommand)bcd.CreateBoundCommand(log);
             var bootManager = new FakeBootManager();
             var executor = new RetirementExecutor(
                 options,
@@ -80,12 +80,13 @@ public sealed class RetirementOrchestrationIntegrationTests(ITestOutputHelper ou
             output.WriteLine(result.Message);
             Assert.Equal(RecoveryRunOutcome.DryRunCompleted, result.Outcome);
             Assert.Equal(0, diskCommand.ExecuteCount);
+            Assert.Equal(0, bcdCommand.ExecuteCount);
             Assert.Equal(RetirementStatus.Phase2BReady, coordinator.State!.Status);
             Assert.False(coordinator.State.DestructiveDeletionPerformed);
             Assert.False(coordinator.State.BcdDeletionPerformed);
             Assert.Single(vhd.CaptureLayout().WithGptId(vhd.Boot1.PartitionGptId));
             var afterBcd = await bcdStore.CaptureAsync();
-            Assert.Empty(afterBcd.WithObjectId(bcd.Boot1Id));
+            Assert.Single(afterBcd.WithObjectId(bcd.Boot1Id));
             Assert.Single(afterBcd.WithObjectId(bcd.Boot2Id));
             output.WriteLine(
                 $"RecoveryRunner accepted PENDING; disk={proof.DiskNumber}; disk0Excluded={proof.DiskNumber != 0}; " +

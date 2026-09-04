@@ -41,24 +41,35 @@ public sealed class RetirementAbandonerTests
 
     [Theory]
     [InlineData(RetirementStatus.Failed)]
-    [InlineData(RetirementStatus.Boot1Retired)]
     public void Other_supported_operator_cleanup_states_can_be_abandoned(RetirementStatus status)
     {
         using var workspace = new TempAbandonWorkspace();
-        var seeded = workspace.SeedTerminal(status, schemaVersion: 2);
-        if (status == RetirementStatus.Boot1Retired)
-        {
-            seeded.DestructiveDeletionPerformed = true;
-            workspace.Coordinator.Persist(seeded);
-        }
+        workspace.SeedTerminal(status, schemaVersion: 2);
 
         var result = workspace.CreateAbandoner().Execute();
 
         Assert.Equal(RetirementStatus.Aborted, result.Reloaded.Status);
         Assert.True(result.Reloaded.IsTerminal);
         Assert.True(File.Exists(result.ArchivePath));
-        Assert.Equal(status == RetirementStatus.Boot1Retired, result.Reloaded.DestructiveDeletionPerformed);
+        Assert.False(result.Reloaded.DestructiveDeletionPerformed);
         Assert.False(result.Reloaded.BcdDeletionPerformed);
+    }
+
+    [Fact]
+    public void Boot1_retired_cannot_be_abandoned_after_destructive_boundary()
+    {
+        using var workspace = new TempAbandonWorkspace();
+        var seeded = workspace.SeedTerminal(RetirementStatus.Boot1Retired, schemaVersion: 2);
+        seeded.DestructiveDeletionPerformed = true;
+        workspace.Coordinator.Persist(seeded);
+
+        var exception = Assert.Throws<RetirementStateException>(() => workspace.CreateAbandoner().Execute());
+
+        Assert.Contains("BOOT1_RETIRED -> ABORTED", exception.Message, StringComparison.Ordinal);
+        var reloaded = workspace.Coordinator.TryLoad();
+        Assert.NotNull(reloaded);
+        Assert.Equal(RetirementStatus.Boot1Retired, reloaded.Status);
+        Assert.True(reloaded.DestructiveDeletionPerformed);
     }
 
     [Fact]
