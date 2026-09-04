@@ -40,15 +40,20 @@ public sealed class WinReLauncherDispatchTests
     }
 
     [Fact]
-    public void Deployment_and_smoke_dispatch_precede_gui_and_are_separately_gated()
+    public void Deployment_and_smoke_dispatch_remain_noninteractive_and_are_separately_gated()
     {
         var source = File.ReadAllText(FindRepoFile("CleanSwitch", "Program.cs"));
+        var desktop = source.IndexOf("if (StartupFlow.IsNormalDesktopStartup(args))", StringComparison.Ordinal);
         var smoke = source.IndexOf("if (recoverySmoke)", StringComparison.Ordinal);
-        var incomplete = source.IndexOf("WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load())", StringComparison.Ordinal);
+        var incomplete = source.IndexOf(
+            "var deploymentInventory = WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load())",
+            smoke,
+            StringComparison.Ordinal);
         var deploy = source.IndexOf("if (deployWinReLauncher)", StringComparison.Ordinal);
         var gui = source.IndexOf("ApplicationConfiguration.Initialize();", StringComparison.Ordinal);
 
-        Assert.True(smoke >= 0 && incomplete > smoke && deploy > incomplete && gui > deploy);
+        Assert.True(desktop >= 0, "Normal desktop startup must be explicitly distinguished from CLI modes.");
+        Assert.True(smoke > desktop && incomplete > smoke && deploy > incomplete && gui > deploy);
         Assert.Contains("--recovery-smoke", source, StringComparison.Ordinal);
         Assert.Contains("--execute-winre-deployment", source, StringComparison.Ordinal);
         Assert.Contains("--recover-winre-deployment", source, StringComparison.Ordinal);

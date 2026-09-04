@@ -51,6 +51,14 @@ internal static class Program
         var recoveryLaunch = HasSwitch(args, RecoveryLaunchSwitch);
         var reviewOnly = (recoveryReview || hardwareReview) && !recoveryRun;
 
+        if (StartupFlow.IsNormalDesktopStartup(args))
+        {
+            return StartupFlow.RunNormalDesktop(
+                () => WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load()),
+                new WinFormsStartupUserInterface(),
+                Report);
+        }
+
         if (recoverySmoke)
         {
             return RunRecoverySmoke(args);
@@ -77,16 +85,14 @@ internal static class Program
         }
 
         var deploymentInventory = WinReDeploymentJournalDiscovery.Inspect(AppConfiguration.Load());
-        if (deploymentInventory.Invalid.Count > 0 || deploymentInventory.Active.Count > 0)
+        if (StartupFlow.IsBlocked(deploymentInventory))
         {
             ConsoleHost.Attach(allocateIfMissing: true);
-            Report("An incomplete or invalid WinRE deployment transaction exists.");
-            Report("CleanSwitch will not start a new operation or its GUI until deterministic rollback recovery completes.");
-            foreach (var item in deploymentInventory.Invalid) Report("INVALID: " + item);
-            foreach (var item in deploymentInventory.Active)
-                Report($"ACTIVE: {item.Path} stage={item.Last.Stage} sequence={item.Last.Sequence}");
-            Report("Use --winre-deployment-status or --recover-winre-deployment. No mutation was attempted.");
-            return 3;
+            return StartupFlow.HandleBlockedDeploymentInterlock(
+                deploymentInventory,
+                showModal: false,
+                userInterface: null,
+                Report);
         }
 
         if (deployWinReLauncher)
